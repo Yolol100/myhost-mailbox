@@ -17,6 +17,8 @@ function add_option($key, $value, $deprecated = '', $autoload = false): bool {
 function get_option($key, $default = false) { return $GLOBALS['bridge_options'][$key] ?? $default; }
 function delete_option($key): bool { unset($GLOBALS['bridge_options'][$key]); return true; }
 function wp_cache_delete($key, $group = ''): bool { return true; }
+function add_action($hook, $callback, $priority = 10, $acceptedArgs = 1): bool { return true; }
+function wp_schedule_single_event($timestamp, $hook, $args = array(), $wpError = false): bool { return true; }
 
 final class BridgeWpdb {
     public string $options = 'wp_options';
@@ -42,6 +44,7 @@ require_once $root . '/wordpress-plugin/webactueel-mailbox-bridge/includes/Store
 use Webactueel\MailboxBridge\Store;
 
 $store = new Store();
+$store->register();
 $requestId = 'mailbox-contract-123456';
 $first = $store->putRequest($requestId, array('action' => 'list_folders'), 300);
 if (empty($first['created']) || ! preg_match('/^[a-f0-9]{64}$/', (string) $first['sha256'])) {
@@ -61,10 +64,14 @@ $result = $store->putResult($requestId, array('ok' => true), (string) $first['sh
 if (empty($result['created']) || empty($store->getResult($requestId)['ready'])) {
     fwrite(STDERR, "result store/readback failed\n"); exit(1);
 }
+$GLOBALS['bridge_transients'] = array();
+if (empty($store->getResult($requestId)['ready'])) {
+    fwrite(STDERR, "durable result disappeared after transient cache flush\n"); exit(1);
+}
 
 $lockId = 'mailbox-lock-123456';
 $lockFirst = $store->putRequest($lockId, array('action' => 'list_folders'), 300);
-$lockKey = 'webactueel_mailbox_lock_' . hash('sha256', $lockId);
+$lockKey = 'webactueel_secret_mailbox_lock_' . hash('sha256', $lockId);
 $GLOBALS['bridge_options'][$lockKey] = json_encode(array('token' => 'other', 'created_at' => time()));
 try {
     $store->putResult($lockId, array('ok' => true), (string) $lockFirst['sha256']);
@@ -104,6 +111,8 @@ foreach (array(
     "'repository_visibility' => 'public'",
     "'sha' => \$this->executorMainSha()",
     'assertNotReplayed',
+    "JTI_PREFIX = 'webactueel_secret_mailbox_jti_'",
+    'claimJwksRefreshWindow',
 ) as $needle) {
     if (false === strpos((string) $oidc, $needle)) {
         fwrite(STDERR, "missing OIDC boundary: {$needle}\n"); exit(1);
@@ -127,18 +136,18 @@ foreach (array(
 }
 
 foreach (array(
-    '_transient_webactueel_mailbox_request_',
-    '_transient_timeout_webactueel_mailbox_request_',
-    '_transient_webactueel_mailbox_result_',
-    '_transient_timeout_webactueel_mailbox_result_',
-    'webactueel_mailbox_lock_',
+    'webactueel_secret_mailbox_request_',
+    'webactueel_secret_mailbox_result_',
+    'webactueel_secret_mailbox_jti_',
+    'webactueel_secret_mailbox_lock_',
+    'webactueel_mailbox_expire_state',
 ) as $needle) {
     if (false === strpos((string) $uninstall, $needle)) {
         fwrite(STDERR, "missing uninstall cleanup: {$needle}\n"); exit(1);
     }
 }
 
-if (false === strpos((string) $bootstrap, 'Version: 0.1.0')) {
+if (false === strpos((string) $bootstrap, 'Version: 0.1.0') || false === strpos((string) $bootstrap, '$store->register();')) {
     fwrite(STDERR, "plugin version missing\n"); exit(1);
 }
 if (preg_match('/(OUTREACH_MAIL_PASSWORD|BEGIN PRIVATE KEY|api[_-]?key\s*=)/i', (string) $oidc . (string) $rest . (string) $bootstrap)) {
