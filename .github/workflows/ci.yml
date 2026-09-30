@@ -62,3 +62,36 @@ jobs:
           set -euo pipefail
           php tests/wordpress_mailbox_bridge_contract.php
           php tests/wordpress_mailbox_bridge_oidc_contract.php
+
+
+  package-wordpress-plugin:
+    if: github.event_name == 'push'
+    needs: [test, wordpress-plugin-contracts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build deterministic WordPress plugin ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build
+          mkdir -p build
+          cp -R wordpress-plugin/webactueel-mailbox-bridge build/webactueel-mailbox-bridge
+          find build/webactueel-mailbox-bridge -type f -exec touch -t 202601010000 {} +
+          (
+            cd build
+            LC_ALL=C find webactueel-mailbox-bridge -type f -print | sort | zip -X -q ../webactueel-mailbox-bridge.zip -@
+          )
+          sha256sum webactueel-mailbox-bridge.zip | tee webactueel-mailbox-bridge.zip.sha256
+          unzip -t webactueel-mailbox-bridge.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: webactueel-mailbox-bridge-package
+          path: |
+            webactueel-mailbox-bridge.zip
+            webactueel-mailbox-bridge.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
