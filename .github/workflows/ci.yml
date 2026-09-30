@@ -19,21 +19,6 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.12'
-      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
-        with:
-          php-version: '8.2'
-          coverage: none
-      - name: WordPress bridge PHP syntax
-        run: |
-          set -euo pipefail
-          find wordpress-plugin -type f -name '*.php' -print0 | xargs -0 -n1 php -l
-          php -l tests/wordpress_mailbox_bridge_contract.php
-          php -l tests/wordpress_mailbox_bridge_oidc_contract.php
-      - name: WordPress bridge contracts
-        run: |
-          set -euo pipefail
-          php tests/wordpress_mailbox_bridge_contract.php
-          php tests/wordpress_mailbox_bridge_oidc_contract.php
       - name: Compile
         run: python3 -m compileall -q myhost_mailbox.py tests
       - name: Test
@@ -50,3 +35,30 @@ jobs:
           grep -q 'UIDPLUS' myhost_mailbox.py
           grep -q 'X-Webactueel-Mailbox-Operation-ID' myhost_mailbox.py
           echo 'PUBLIC_SOURCE_SAFETY=green'
+
+  wordpress-plugin-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4','8.0','8.1','8.2','8.3','8.4','8.5']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      - name: PHP syntax
+        run: |
+          set -euo pipefail
+          find wordpress-plugin -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+          php -l tests/wordpress_mailbox_bridge_contract.php
+          php -l tests/wordpress_mailbox_bridge_oidc_contract.php
+      - name: Bridge contracts
+        run: |
+          set -euo pipefail
+          php tests/wordpress_mailbox_bridge_contract.php
+          php tests/wordpress_mailbox_bridge_oidc_contract.php
