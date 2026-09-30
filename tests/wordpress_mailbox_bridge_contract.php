@@ -16,6 +16,7 @@ function add_option($key, $value, $deprecated = '', $autoload = false): bool {
 }
 function get_option($key, $default = false) { return $GLOBALS['bridge_options'][$key] ?? $default; }
 function delete_option($key): bool { unset($GLOBALS['bridge_options'][$key]); return true; }
+function update_option($key, $value, $autoload = null): bool { $GLOBALS['bridge_options'][$key] = $value; return true; }
 function wp_cache_delete($key, $group = ''): bool { return true; }
 function add_action($hook, $callback, $priority = 10, $acceptedArgs = 1): bool { return true; }
 function wp_schedule_single_event($timestamp, $hook, $args = array(), $wpError = false): bool { return true; }
@@ -83,15 +84,17 @@ unset($GLOBALS['bridge_options'][$lockKey]);
 
 $staleId = 'mailbox-stale-123456';
 $old = $store->putRequest($staleId, array('action' => 'list_folders'), 300);
-$store->clear($staleId);
-$new = $store->putRequest($staleId, array('action' => 'list_messages', 'folder' => 'INBOX'), 300);
 try {
-    $store->putResult($staleId, array('ok' => true), (string) $old['sha256']);
-    fwrite(STDERR, "stale result hash was accepted\n"); exit(1);
+    $store->clear($staleId);
+    fwrite(STDERR, "unread mailbox state was cleared\n"); exit(1);
 } catch (RuntimeException $error) {
-    if (false === strpos($error->getMessage(), 'changed')) { throw $error; }
+    if (false === strpos($error->getMessage(), 'must be read')) { throw $error; }
 }
-$store->putResult($staleId, array('ok' => true), (string) $new['sha256']);
+$store->putResult($staleId, array('ok' => true), (string) $old['sha256']);
+$ready = $store->getResult($staleId);
+if (empty($ready['ready'])) {
+    fwrite(STDERR, "mailbox result could not be consumed before clear\n"); exit(1);
+}
 $store->clear($staleId);
 if (! empty($store->getResult($staleId)['ready'])) {
     fwrite(STDERR, "cleanup readback failed\n"); exit(1);
