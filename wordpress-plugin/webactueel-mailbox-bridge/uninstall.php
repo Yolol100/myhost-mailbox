@@ -9,16 +9,18 @@ if (! defined('WP_UNINSTALL_PLUGIN')) {
 $cleanup = static function (): void {
     delete_transient('webactueel_mailbox_oidc_jwks_v1');
     delete_transient('webactueel_mailbox_executor_sha_v1');
+    delete_transient('webactueel_mailbox_jti_cleanup_v1');
+    delete_option('webactueel_mailbox_jwks_refresh_after_v1');
+    if (function_exists('wp_clear_scheduled_hook')) {
+        wp_clear_scheduled_hook('webactueel_mailbox_expire_state');
+    }
 
     global $wpdb;
     foreach (array(
-        '_transient_webactueel_mailbox_request_',
-        '_transient_timeout_webactueel_mailbox_request_',
-        '_transient_webactueel_mailbox_result_',
-        '_transient_timeout_webactueel_mailbox_result_',
-        '_transient_webactueel_mailbox_oidc_jti_',
-        '_transient_timeout_webactueel_mailbox_oidc_jti_',
-        'webactueel_mailbox_lock_',
+        'webactueel_secret_mailbox_request_',
+        'webactueel_secret_mailbox_result_',
+        'webactueel_secret_mailbox_jti_',
+        'webactueel_secret_mailbox_lock_',
     ) as $prefix) {
         $like = $wpdb->esc_like($prefix) . '%';
         $names = $wpdb->get_col($wpdb->prepare(
