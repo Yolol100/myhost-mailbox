@@ -12,18 +12,33 @@ import uuid
 from email.message import EmailMessage
 from email.parser import BytesParser
 from email.policy import default
-from email.utils import formatdate, getaddresses, make_msgid
+from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from pathlib import Path
 
 SEND_ENABLE_ENV = "OUTREACH_SMTP_SEND_ENABLED"
 MAX_ATTACHMENTS = 20
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_MESSAGE_BYTES = 50 * 1024 * 1024
+MAX_THREAD_MESSAGES = 100
 UID_RE = re.compile(r"^[1-9][0-9]*$")
+SPECIAL_FLAGS = {
+    "drafts": "\\DRAFTS",
+    "sent": "\\SENT",
+    "trash": "\\TRASH",
+    "junk": "\\JUNK",
+    "archive": "\\ARCHIVE",
+}
+SPECIAL_NAMES = {
+    "drafts": ("draft", "concept"),
+    "sent": ("sent", "verzonden"),
+    "trash": ("trash", "deleted", "prullenbak"),
+    "junk": ("junk", "spam", "ongewenst"),
+    "archive": ("archive", "archief"),
+}
 
 
 class UnknownOutcomeError(RuntimeError):
-    """The provider may have applied a write, but exact readback was not possible."""
+    """A provider write may have succeeded, but exact readback is unavailable."""
 
 
 def normalize_text(value: object) -> str:
@@ -88,21 +103,44 @@ def capabilities(client) -> set[str]:
     return set(text.split())
 
 
-def decode_folder(raw: bytes) -> str:
+def parse_folder_row(raw: bytes) -> dict:
     text = raw.decode("utf-8", errors="replace")
+    flag_match = re.match(r"^\(([^)]*)\)", text)
+    flags = [] if not flag_match else [item.upper() for item in flag_match.group(1).split()]
     if '"' in text:
         end = text.rfind('"')
         start = text.rfind('"', 0, end)
-        if start >= 0:
-            return text[start + 1 : end].replace('\\"', '"')
-    return text.split()[-1].strip('"')
+        name = text[start + 1 : end].replace('\\"', '"') if start >= 0 else text.split()[-1].strip('"')
+    else:
+        name = text.split()[-1].strip('"')
+    return {"name": name, "flags": flags}
 
 
-def list_folders(client) -> list[str]:
+def list_folder_info(client) -> list[dict]:
     status, rows = client.list()
     if status != "OK":
         raise RuntimeError("Could not list IMAP folders")
-    return [decode_folder(row) for row in (rows or [])]
+    return [parse_folder_row(row) for row in (rows or [])]
+
+
+def list_folders(client) -> list[str]:
+    return [item["name"] for item in list_folder_info(client)]
+
+
+def find_special_folder(client, kind: str) -> str:
+    kind = normalize_text(kind).casefold()
+    if kind not in SPECIAL_FLAGS:
+        raise ValueError(f"unknown special folder kind: {kind}")
+    info = list_folder_info(client)
+    expected_flag = SPECIAL_FLAGS[kind]
+    for item in info:
+        if expected_flag in item["flags"]:
+            return item["name"]
+    for item in info:
+        low = item["name"].casefold()
+        if any(token in low for token in SPECIAL_NAMES[kind]):
+            return item["name"]
+    raise RuntimeError(f"Could not find {kind} folder")
 
 
 def select_folder(client, folder: str, *, readonly: bool = True) -> int:
@@ -122,6 +160,13 @@ def _uid(client, command: str, *args):
     if status != "OK":
         raise RuntimeError(f"IMAP UID {command} failed")
     return data
+
+
+def _search_header(client, folder: str, header: str, value: str) -> list[str]:
+    select_folder(client, folder, readonly=True)
+    clean = _required_text(value, "header value").replace('"', "")
+    data = _uid(client, "search", None, "HEADER", header, f'"{clean}"')
+    return [item.decode("ascii") for item in (data[0] if data else b"").split()]
 
 
 def list_message_uids(client, folder: str, *, unread_only: bool = False, limit: int = 50) -> list[str]:
@@ -165,12 +210,21 @@ def _body_parts(msg: EmailMessage) -> tuple[str, str | None]:
     return plain, html
 
 
-def serialize_message(
-    msg: EmailMessage,
-    *,
-    include_attachments: bool = True,
-    include_attachment_content: bool = True,
-) -> dict:
+def message_summary(msg: EmailMessage, uid: str) -> dict:
+    return {
+        "uid": _uid_text(uid),
+        "message_id": normalize_text(msg.get("Message-ID", "")) or None,
+        "from": normalize_text(msg.get("From", "")),
+        "to": normalize_text(msg.get("To", "")),
+        "cc": normalize_text(msg.get("Cc", "")) or None,
+        "subject": normalize_text(msg.get("Subject", "")),
+        "date": normalize_text(msg.get("Date", "")) or None,
+        "in_reply_to": normalize_text(msg.get("In-Reply-To", "")) or None,
+        "has_attachments": any(True for _ in msg.iter_attachments()),
+    }
+
+
+def serialize_message(msg: EmailMessage, *, uid: str | None = None, include_attachments: bool = True, include_attachment_content: bool = True) -> dict:
     plain, html = _body_parts(msg)
     attachments = []
     total_bytes = 0
@@ -178,20 +232,16 @@ def serialize_message(
         parts = list(msg.iter_attachments())
         if len(parts) > MAX_ATTACHMENTS:
             raise ValueError("message has more than 20 attachments")
-        for part in parts:
+        for index, part in enumerate(parts):
             payload = part.get_payload(decode=True) or b""
             total_bytes += len(payload)
             if total_bytes > MAX_ATTACHMENT_BYTES:
                 raise ValueError("message attachments exceed 25 MiB")
-            item = {
-                "filename": part.get_filename(),
-                "content_type": part.get_content_type(),
-                "size": len(payload),
-            }
+            item = {"index": index, "filename": part.get_filename(), "content_type": part.get_content_type(), "size": len(payload)}
             if include_attachment_content:
                 item["content_base64"] = base64.b64encode(payload).decode("ascii")
             attachments.append(item)
-    return {
+    result = {
         "message_id": normalize_text(msg.get("Message-ID", "")) or None,
         "from": normalize_text(msg.get("From", "")),
         "to": normalize_text(msg.get("To", "")),
@@ -205,6 +255,26 @@ def serialize_message(
         "body_html": html,
         "attachments": attachments,
     }
+    if uid is not None:
+        result["uid"] = _uid_text(uid)
+    return result
+
+
+def read_attachment(client, folder: str, uid: str, index: int) -> dict:
+    msg = fetch_message(client, folder, uid)
+    parts = list(msg.iter_attachments())
+    if index < 0 or index >= len(parts):
+        raise ValueError("attachment index is out of range")
+    part = parts[index]
+    payload = part.get_payload(decode=True) or b""
+    if len(payload) > MAX_ATTACHMENT_BYTES:
+        raise ValueError("attachment exceeds 25 MiB")
+    return {"index": index, "filename": part.get_filename(), "content_type": part.get_content_type(), "size": len(payload), "content_base64": base64.b64encode(payload).decode("ascii")}
+
+
+def list_message_summaries(client, folder: str, *, unread_only: bool = False, limit: int = 50) -> list[dict]:
+    uids = list_message_uids(client, folder, unread_only=unread_only, limit=limit)
+    return [message_summary(fetch_message(client, folder, uid), uid) for uid in uids]
 
 
 def _search_value(value: object) -> str:
@@ -214,17 +284,7 @@ def _search_value(value: object) -> str:
     return text.replace('"', "")
 
 
-def search_messages(
-    client,
-    folder: str,
-    *,
-    from_text: str | None = None,
-    to_text: str | None = None,
-    subject_text: str | None = None,
-    body_text: str | None = None,
-    unread_only: bool = False,
-    limit: int = 50,
-) -> list[str]:
+def search_message_uids(client, folder: str, *, from_text: str | None = None, to_text: str | None = None, subject_text: str | None = None, body_text: str | None = None, unread_only: bool = False, limit: int = 50) -> list[str]:
     if limit < 1 or limit > 500:
         raise ValueError("limit must be 1-500")
     select_folder(client, folder, readonly=True)
@@ -240,6 +300,60 @@ def search_messages(
     data = _uid(client, "search", None, *criteria)
     uids = (data[0] if data else b"").split()
     return [uid.decode("ascii") for uid in uids[-limit:]][::-1]
+
+
+def search_message_summaries(client, folder: str, **kwargs) -> list[dict]:
+    uids = search_message_uids(client, folder, **kwargs)
+    return [message_summary(fetch_message(client, folder, uid), uid) for uid in uids]
+
+
+def thread_messages(client, folder: str, uid: str) -> list[dict]:
+    root_uid = _uid_text(uid)
+    found: dict[str, EmailMessage] = {root_uid: fetch_message(client, folder, root_uid)}
+    seen_ids: set[str] = set()
+
+    current = found[root_uid]
+    for _ in range(MAX_THREAD_MESSAGES):
+        parent_id = normalize_text(current.get("In-Reply-To", ""))
+        if not parent_id or parent_id in seen_ids:
+            break
+        seen_ids.add(parent_id)
+        parent_uids = _search_header(client, folder, "Message-ID", parent_id)
+        if not parent_uids:
+            break
+        parent_uid = parent_uids[0]
+        if parent_uid in found:
+            break
+        current = fetch_message(client, folder, parent_uid)
+        found[parent_uid] = current
+
+    queue = [normalize_text(msg.get("Message-ID", "")) for msg in found.values()]
+    queue = [item for item in queue if item]
+    processed: set[str] = set()
+    while queue and len(found) < MAX_THREAD_MESSAGES:
+        message_id = queue.pop(0)
+        if message_id in processed:
+            continue
+        processed.add(message_id)
+        for child_uid in _search_header(client, folder, "In-Reply-To", message_id):
+            if child_uid in found:
+                continue
+            child = fetch_message(client, folder, child_uid)
+            found[child_uid] = child
+            child_id = normalize_text(child.get("Message-ID", ""))
+            if child_id:
+                queue.append(child_id)
+            if len(found) >= MAX_THREAD_MESSAGES:
+                break
+
+    def sort_key(item: tuple[str, EmailMessage]):
+        date = normalize_text(item[1].get("Date", ""))
+        try:
+            return parsedate_to_datetime(date).timestamp() if date else 0.0
+        except Exception:
+            return 0.0
+
+    return [serialize_message(msg, uid=message_uid, include_attachments=False, include_attachment_content=False) for message_uid, msg in sorted(found.items(), key=sort_key)]
 
 
 def create_folder(client, folder: str) -> None:
@@ -367,13 +481,11 @@ def build_message(payload: dict, *, include_bcc: bool = True, operation_id: str 
     return msg
 
 
-def _verify_appended_message(client, folder: str, operation_id: str) -> str:
-    select_folder(client, folder, readonly=True)
-    data = _uid(client, "search", None, "HEADER", "X-Webactueel-Mailbox-Operation-ID", f'"{operation_id}"')
-    uids = (data[0] if data else b"").split()
+def _verify_by_header(client, folder: str, header: str, value: str) -> str:
+    uids = _search_header(client, folder, header, value)
     if len(uids) != 1:
-        raise UnknownOutcomeError("draft append succeeded but exact readback could not identify one message")
-    return uids[0].decode("ascii")
+        raise UnknownOutcomeError(f"write succeeded but exact readback found {len(uids)} matching messages")
+    return uids[0]
 
 
 def append_draft(client, folder: str, payload: dict) -> str:
@@ -383,7 +495,7 @@ def append_draft(client, folder: str, payload: dict) -> str:
     status, _ = client.append(folder, "(\\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes(policy=default))
     if status != "OK":
         raise RuntimeError("IMAP APPEND failed")
-    return _verify_appended_message(client, folder, operation_id)
+    return _verify_by_header(client, folder, "X-Webactueel-Mailbox-Operation-ID", operation_id)
 
 
 def replace_draft(client, folder: str, uid: str, payload: dict) -> str:
@@ -396,7 +508,22 @@ def replace_draft(client, folder: str, uid: str, payload: dict) -> str:
     return new_uid
 
 
-def send_message(payload: dict, *, confirm_send: bool = False, smtp_factory=connect_smtp) -> dict:
+def _payload_from_message(msg: EmailMessage) -> dict:
+    data = serialize_message(msg, include_attachments=True, include_attachment_content=True)
+    return {
+        "to": data["to"],
+        "cc": data["cc"],
+        "bcc": data["bcc"],
+        "subject": data["subject"],
+        "body_text": data["body_text"],
+        "body_html": data["body_html"],
+        "attachments": data["attachments"],
+        "in_reply_to": data["in_reply_to"],
+        "references": data["references"],
+    }
+
+
+def send_message(payload: dict, *, confirm_send: bool = False, save_sent_copy: bool = True, smtp_factory=connect_smtp, imap_factory=connect_imap) -> dict:
     enabled = os.getenv(SEND_ENABLE_ENV, "").strip().casefold() in {"1", "true", "yes", "on"}
     if not confirm_send or not enabled:
         raise RuntimeError("Sending requires confirm_send=true and OUTREACH_SMTP_SEND_ENABLED=true")
@@ -411,12 +538,37 @@ def send_message(payload: dict, *, confirm_send: bool = False, smtp_factory=conn
             smtp.quit()
         except Exception:
             pass
-    return {
-        "message_id": normalize_text(msg.get("Message-ID", "")),
-        "to": normalize_text(msg.get("To", "")),
-        "subject": normalize_text(msg.get("Subject", "")),
-        "sent": True,
-    }
+
+    result = {"message_id": normalize_text(msg.get("Message-ID", "")), "to": normalize_text(msg.get("To", "")), "subject": normalize_text(msg.get("Subject", "")), "sent": True, "sent_copy": False}
+    if not save_sent_copy:
+        return result
+
+    client = None
+    try:
+        client = imap_factory()
+        sent_folder = find_special_folder(client, "sent")
+        copy = BytesParser(policy=default).parsebytes(msg.as_bytes(policy=default))
+        if "Bcc" in copy:
+            del copy["Bcc"]
+        status, _ = client.append(sent_folder, "(\\Seen)", imaplib.Time2Internaldate(time.time()), copy.as_bytes(policy=default))
+        if status != "OK":
+            result["sent_copy_warning"] = "message sent, but IMAP Sent append failed"
+            return result
+        try:
+            result["sent_uid"] = _verify_by_header(client, sent_folder, "Message-ID", result["message_id"])
+            result["sent_copy"] = True
+        except UnknownOutcomeError:
+            result["sent_copy_warning"] = "message sent and Sent append returned OK, but exact Sent readback was ambiguous"
+        return result
+    except Exception:
+        result["sent_copy_warning"] = "message sent, but Sent-folder readback was unavailable"
+        return result
+    finally:
+        if client is not None:
+            try:
+                client.logout()
+            except Exception:
+                pass
 
 
 def _mailboxes_from_headers(values: list[str]) -> list[str]:
@@ -424,10 +576,7 @@ def _mailboxes_from_headers(values: list[str]) -> list[str]:
 
 
 def _own_addresses() -> set[str]:
-    values = {
-        os.getenv("OUTREACH_MAIL_USER", "info@andrewbaeten.nl").strip().casefold(),
-        os.getenv("OUTREACH_SENDER_EMAIL", "info@andrewbaeten.nl").strip().casefold(),
-    }
+    values = {os.getenv("OUTREACH_MAIL_USER", "info@andrewbaeten.nl").strip().casefold(), os.getenv("OUTREACH_SENDER_EMAIL", "info@andrewbaeten.nl").strip().casefold()}
     return {value for value in values if value}
 
 
@@ -440,7 +589,6 @@ def reply_payload(source: EmailMessage, body_text: str, *, reply_all: bool = Fal
     subject = normalize_text(source.get("Subject", ""))
     if not subject.casefold().startswith("re:"):
         subject = f"Re: {subject}"
-
     cc: list[str] = []
     if reply_all:
         own = _own_addresses()
@@ -451,18 +599,10 @@ def reply_payload(source: EmailMessage, body_text: str, *, reply_all: bool = Fal
                 continue
             seen.add(key)
             cc.append(address)
-
     refs = normalize_text(source.get("References", ""))
     source_id = normalize_text(source.get("Message-ID", ""))
     references = " ".join(x for x in (refs, source_id) if x)
-    return {
-        "to": [primary],
-        "cc": cc,
-        "subject": subject,
-        "body_text": normalize_text(body_text),
-        "in_reply_to": source_id or None,
-        "references": references or None,
-    }
+    return {"to": [primary], "cc": cc, "subject": subject, "body_text": normalize_text(body_text), "in_reply_to": source_id or None, "references": references or None}
 
 
 def forward_payload(source: EmailMessage, to: object, note: str = "") -> dict:
@@ -471,71 +611,87 @@ def forward_payload(source: EmailMessage, to: object, note: str = "") -> dict:
     if not subject.casefold().startswith("fwd:"):
         subject = f"Fwd: {subject}"
     body = normalize_text(note)
-    forwarded = (f"{body}\n\n" if body else "") + (
-        "---------- Forwarded message ----------\n"
-        f"From: {original['from']}\nTo: {original['to']}\n"
-        f"Subject: {original['subject']}\nDate: {original['date'] or ''}\n\n"
-        f"{original['body_text']}"
-    )
+    forwarded = (f"{body}\n\n" if body else "") + ("---------- Forwarded message ----------\n" f"From: {original['from']}\nTo: {original['to']}\n" f"Subject: {original['subject']}\nDate: {original['date'] or ''}\n\n" f"{original['body_text']}")
     return {"to": to, "subject": subject, "body_text": forwarded, "attachments": original["attachments"]}
 
 
 def execute(request: dict) -> dict:
     action = normalize_text(request.get("action"))
     if action == "send":
-        return send_message(request.get("message") or {}, confirm_send=bool(request.get("confirm_send")))
+        return send_message(request.get("message") or {}, confirm_send=bool(request.get("confirm_send")), save_sent_copy=bool(request.get("save_sent_copy", True)))
 
     client = connect_imap()
     try:
         if action == "list_folders":
-            return {"folders": list_folders(client)}
+            return {"folders": list_folder_info(client)}
         if action == "create_folder":
-            create_folder(client, request.get("folder"))
-            return {"ok": True}
+            create_folder(client, request.get("folder")); return {"ok": True}
         if action == "rename_folder":
-            rename_folder(client, request.get("folder"), request.get("destination"))
-            return {"ok": True}
+            rename_folder(client, request.get("folder"), request.get("destination")); return {"ok": True}
         if action == "delete_folder":
-            if not request.get("confirm"):
-                raise RuntimeError("delete_folder requires confirm=true")
-            delete_folder(client, request.get("folder"))
-            return {"ok": True}
+            if not request.get("confirm"): raise RuntimeError("delete_folder requires confirm=true")
+            delete_folder(client, request.get("folder")); return {"ok": True}
         if action == "list_messages":
-            return {"uids": list_message_uids(client, request.get("folder"), unread_only=bool(request.get("unread_only")), limit=int(request.get("limit") or 50))}
+            return {"messages": list_message_summaries(client, request.get("folder"), unread_only=bool(request.get("unread_only")), limit=int(request.get("limit") or 50))}
         if action == "search":
-            return {"uids": search_messages(client, request.get("folder"), from_text=request.get("from"), to_text=request.get("to"), subject_text=request.get("subject"), body_text=request.get("body"), unread_only=bool(request.get("unread_only")), limit=int(request.get("limit") or 50))}
+            return {"messages": search_message_summaries(client, request.get("folder"), from_text=request.get("from"), to_text=request.get("to"), subject_text=request.get("subject"), body_text=request.get("body"), unread_only=bool(request.get("unread_only")), limit=int(request.get("limit") or 50))}
         if action == "read":
             msg = fetch_message(client, request.get("folder"), request.get("uid"))
-            return {"message": serialize_message(msg, include_attachments=bool(request.get("include_attachments", True)), include_attachment_content=bool(request.get("include_attachment_content", True)))}
+            return {"message": serialize_message(msg, uid=request.get("uid"), include_attachments=bool(request.get("include_attachments", True)), include_attachment_content=bool(request.get("include_attachment_content", True)))}
+        if action == "read_attachment":
+            return {"attachment": read_attachment(client, request.get("folder"), request.get("uid"), int(request.get("index", 0)))}
+        if action == "thread":
+            return {"messages": thread_messages(client, request.get("folder"), request.get("uid"))}
         if action == "mark_read":
-            set_flag(client, request.get("folder"), request.get("uid"), "\\Seen", enabled=True)
-            return {"ok": True}
+            set_flag(client, request.get("folder"), request.get("uid"), "\\Seen", enabled=True); return {"ok": True}
         if action == "mark_unread":
-            set_flag(client, request.get("folder"), request.get("uid"), "\\Seen", enabled=False)
-            return {"ok": True}
+            set_flag(client, request.get("folder"), request.get("uid"), "\\Seen", enabled=False); return {"ok": True}
         if action == "flag":
-            set_flag(client, request.get("folder"), request.get("uid"), "\\Flagged", enabled=True)
-            return {"ok": True}
+            set_flag(client, request.get("folder"), request.get("uid"), "\\Flagged", enabled=True); return {"ok": True}
         if action == "unflag":
-            set_flag(client, request.get("folder"), request.get("uid"), "\\Flagged", enabled=False)
-            return {"ok": True}
+            set_flag(client, request.get("folder"), request.get("uid"), "\\Flagged", enabled=False); return {"ok": True}
         if action == "copy":
-            copy_message(client, request.get("folder"), request.get("uid"), request.get("destination"))
-            return {"ok": True}
-        if action == "move":
-            move_message(client, request.get("folder"), request.get("uid"), request.get("destination"))
-            return {"ok": True}
+            copy_message(client, request.get("folder"), request.get("uid"), request.get("destination")); return {"ok": True}
+        if action in {"move", "archive", "trash", "junk"}:
+            destination = request.get("destination") if action == "move" else find_special_folder(client, action)
+            move_message(client, request.get("folder"), request.get("uid"), destination); return {"ok": True, "destination": destination}
         if action == "delete":
-            if not request.get("confirm"):
-                raise RuntimeError("delete requires confirm=true")
-            delete_message(client, request.get("folder"), request.get("uid"))
-            return {"ok": True}
+            if not request.get("confirm"): raise RuntimeError("delete requires confirm=true")
+            delete_message(client, request.get("folder"), request.get("uid")); return {"ok": True}
         if action == "create_draft":
-            return {"uid": append_draft(client, request.get("folder"), request.get("message") or {})}
+            folder = request.get("folder") or find_special_folder(client, "drafts")
+            return {"uid": append_draft(client, folder, request.get("message") or {}), "folder": folder}
         if action == "replace_draft":
-            if not request.get("confirm"):
-                raise RuntimeError("replace_draft requires confirm=true")
-            return {"uid": replace_draft(client, request.get("folder"), request.get("uid"), request.get("message") or {})}
+            if not request.get("confirm"): raise RuntimeError("replace_draft requires confirm=true")
+            folder = request.get("folder") or find_special_folder(client, "drafts")
+            return {"uid": replace_draft(client, folder, request.get("uid"), request.get("message") or {}), "folder": folder}
+        if action in {"reply", "reply_all", "forward", "send_draft"}:
+            folder = request.get("folder")
+            uid = request.get("uid")
+            source = fetch_message(client, folder, uid)
+            if action == "reply":
+                payload = reply_payload(source, request.get("body_text"), reply_all=False)
+            elif action == "reply_all":
+                payload = reply_payload(source, request.get("body_text"), reply_all=True)
+            elif action == "forward":
+                payload = forward_payload(source, request.get("to"), request.get("note", ""))
+            else:
+                payload = _payload_from_message(source)
+            try: client.logout()
+            except Exception: pass
+            result = send_message(payload, confirm_send=bool(request.get("confirm_send")), save_sent_copy=bool(request.get("save_sent_copy", True)))
+            if action == "send_draft" and result.get("sent"):
+                cleanup = connect_imap()
+                try:
+                    delete_message(cleanup, folder, uid)
+                    result["draft_deleted"] = True
+                except Exception:
+                    result["draft_deleted"] = False
+                    result["draft_delete_warning"] = "message was sent, but the original draft could not be safely deleted"
+                finally:
+                    try: cleanup.logout()
+                    except Exception: pass
+            return result
         raise ValueError(f"Unknown action: {action}")
     finally:
         try:
@@ -546,12 +702,10 @@ def execute(request: dict) -> dict:
 
 def main() -> int:
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-
     request = json.loads(Path(args.request).read_text(encoding="utf-8"))
     result = execute(request)
     Path(args.output).write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
