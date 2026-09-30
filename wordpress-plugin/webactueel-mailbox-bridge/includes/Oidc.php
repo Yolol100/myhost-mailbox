@@ -24,6 +24,9 @@ final class Oidc
     private const CLOCK_SKEW = 60;
     private const MAX_TOKEN_AGE = 600;
     private const JWKS_TRANSIENT = 'webactueel_mailbox_oidc_jwks_v1';
+    private const JWKS_REFRESH_OPTION = 'webactueel_mailbox_jwks_refresh_after_v1';
+    private const JTI_PREFIX = 'webactueel_secret_mailbox_jti_';
+    private const JTI_CLEANUP_TRANSIENT = 'webactueel_mailbox_jti_cleanup_v1';
     private const EXECUTOR_SHA_TRANSIENT = 'webactueel_mailbox_executor_sha_v1';
 
     public function authenticatePrivate(\WP_REST_Request $request): bool
@@ -43,18 +46,23 @@ final class Oidc
 
     public function authenticateExecutor(\WP_REST_Request $request): bool
     {
-        return $this->authenticateExpected($request, array(
-            'repository' => self::EXECUTOR_REPOSITORY,
-            'repository_id' => self::EXECUTOR_REPOSITORY_ID,
-            'repository_owner_id' => self::OWNER_ID,
-            'actor_id' => self::OWNER_ID,
-            'repository_visibility' => 'public',
-            'ref' => 'refs/heads/main',
-            'workflow_ref' => self::EXECUTOR_WORKFLOW_REF,
-            'event_name' => 'issues',
-            'runner_environment' => 'github-hosted',
-            'sha' => $this->executorMainSha(),
-        ));
+        return $this->authenticateExpected(
+            $request,
+            array(
+                'repository' => self::EXECUTOR_REPOSITORY,
+                'repository_id' => self::EXECUTOR_REPOSITORY_ID,
+                'repository_owner_id' => self::OWNER_ID,
+                'actor_id' => self::OWNER_ID,
+                'repository_visibility' => 'public',
+                'ref' => 'refs/heads/main',
+                'workflow_ref' => self::EXECUTOR_WORKFLOW_REF,
+                'event_name' => 'issues',
+                'runner_environment' => 'github-hosted',
+            ),
+            function (): array {
+                return array('sha' => $this->executorMainSha());
+            }
+        );
     }
 
     public static function expectedAudience(): string
@@ -62,7 +70,7 @@ final class Oidc
         return rtrim((string) rest_url('webactueel-mailbox-bridge/v1'), '/');
     }
 
-    private function authenticateExpected(\WP_REST_Request $request, array $expected): bool
+    private function authenticateExpected(\WP_REST_Request $request, array $expected, ?callable $lateExpected = null): bool
     {
         $token = (string) $request->get_header(self::HEADER);
         if ('' === $token) {
@@ -89,13 +97,16 @@ final class Oidc
             throw new RuntimeException('GitHub OIDC key id is invalid.');
         }
 
+        $this->assertClaims($claims, $expected);
         $publicKey = $this->publicKey($kid);
         $verified = openssl_verify($parts[0] . '.' . $parts[1], $signature, $publicKey, OPENSSL_ALGO_SHA256);
         if (1 !== $verified) {
             throw new RuntimeException('GitHub OIDC signature verification failed.');
         }
 
-        $this->assertClaims($claims, $expected);
+        if (null !== $lateExpected) {
+            $this->assertExpectedClaims($claims, $lateExpected());
+        }
         $this->assertNotReplayed($claims);
         return true;
     }
@@ -120,26 +131,62 @@ final class Oidc
             throw new RuntimeException('GitHub OIDC token is stale or invalid.');
         }
 
-        foreach ($expected as $name => $value) {
-            if (! isset($claims[$name]) || ! is_scalar($claims[$name]) || ! hash_equals((string) $value, (string) $claims[$name])) {
-                throw new RuntimeException('GitHub OIDC claim is not trusted: ' . $name . '.');
-            }
-        }
+        $this->assertExpectedClaims($claims, $expected);
 
         if (! isset($claims['jti']) || ! is_string($claims['jti']) || '' === $claims['jti'] || strlen($claims['jti']) > 200) {
             throw new RuntimeException('GitHub OIDC token identifier is invalid.');
         }
     }
 
+    private function assertExpectedClaims(array $claims, array $expected): void
+    {
+        foreach ($expected as $name => $value) {
+            if (! isset($claims[$name]) || ! is_scalar($claims[$name]) || ! hash_equals((string) $value, (string) $claims[$name])) {
+                throw new RuntimeException('GitHub OIDC claim is not trusted: ' . $name . '.');
+            }
+        }
+    }
+
     private function assertNotReplayed(array $claims): void
     {
-        $key = 'webactueel_mailbox_oidc_jti_' . hash('sha256', (string) $claims['jti']);
-        if (false !== get_transient($key)) {
+        $key = self::JTI_PREFIX . hash('sha256', (string) $claims['jti']);
+        $ttl = max(60, min(self::MAX_TOKEN_AGE + self::CLOCK_SKEW, ((int) $claims['exp']) - time() + self::CLOCK_SKEW));
+        $expiresAt = time() + $ttl;
+
+        if (! add_option($key, $expiresAt, '', false)) {
             throw new RuntimeException('GitHub OIDC token was already used.');
         }
-        $ttl = max(60, min(self::MAX_TOKEN_AGE + self::CLOCK_SKEW, ((int) $claims['exp']) - time() + self::CLOCK_SKEW));
-        if (! set_transient($key, '1', $ttl)) {
-            throw new RuntimeException('GitHub OIDC replay guard could not be stored.');
+
+        $this->cleanupExpiredJtis();
+    }
+
+    private function cleanupExpiredJtis(): void
+    {
+        if (false !== get_transient(self::JTI_CLEANUP_TRANSIENT)) {
+            return;
+        }
+        if (! set_transient(self::JTI_CLEANUP_TRANSIENT, '1', 60)) {
+            return;
+        }
+
+        global $wpdb;
+        if (! isset($wpdb->options) || ! is_string($wpdb->options)) {
+            return;
+        }
+        $like = $wpdb->esc_like(self::JTI_PREFIX) . '%';
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT 200",
+                $like
+            )
+        );
+        $now = time();
+        foreach ((array) $rows as $row) {
+            $name = isset($row->option_name) ? (string) $row->option_name : '';
+            $expiresAt = isset($row->option_value) ? (int) $row->option_value : 0;
+            if ('' !== $name && 0 === strpos($name, self::JTI_PREFIX) && $expiresAt > 0 && $expiresAt < $now) {
+                delete_option($name);
+            }
         }
     }
 
@@ -209,6 +256,10 @@ final class Oidc
             }
         }
 
+        if (! $this->claimJwksRefreshWindow()) {
+            throw new RuntimeException('GitHub OIDC signing-key refresh is temporarily rate-limited.');
+        }
+
         $response = wp_safe_remote_get(self::JWKS_URL, array(
             'timeout' => 5,
             'redirection' => 0,
@@ -232,6 +283,37 @@ final class Oidc
         }
         set_transient(self::JWKS_TRANSIENT, $decoded, 6 * HOUR_IN_SECONDS);
         return $decoded['keys'];
+    }
+
+    private function claimJwksRefreshWindow(): bool
+    {
+        $now = time();
+        $until = $now + 60;
+        if (add_option(self::JWKS_REFRESH_OPTION, $until, '', false)) {
+            return true;
+        }
+
+        $existing = get_option(self::JWKS_REFRESH_OPTION, 0);
+        if ((int) $existing > $now) {
+            return false;
+        }
+
+        global $wpdb;
+        if (! isset($wpdb->options) || ! is_string($wpdb->options)) {
+            return false;
+        }
+        $updated = $wpdb->update(
+            $wpdb->options,
+            array('option_value' => (string) $until),
+            array('option_name' => self::JWKS_REFRESH_OPTION, 'option_value' => (string) $existing),
+            array('%s'),
+            array('%s', '%s')
+        );
+        if (1 !== $updated) {
+            return false;
+        }
+        wp_cache_delete(self::JWKS_REFRESH_OPTION, 'options');
+        return true;
     }
 
     private function findKey(array $keys, string $kid): ?array
