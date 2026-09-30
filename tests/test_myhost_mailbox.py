@@ -164,6 +164,61 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(item["filename"], "a.txt")
         self.assertEqual(base64.b64decode(item["content_base64"]), b"hi")
 
+    def test_attachment_chunk_is_bounded_and_resumable(self):
+        payload = b"x" * (m.MAX_CHUNK_BYTES + 10)
+        msg = m.build_message({
+            "to": "person@example.test",
+            "subject": "Chunked",
+            "body_text": "Hello",
+            "attachments": [{
+                "filename": "big.bin",
+                "content_type": "application/octet-stream",
+                "content_base64": base64.b64encode(payload).decode(),
+            }],
+        })
+        client = FakeIMAP()
+        client.messages["7"] = msg.as_bytes()
+        first = m.read_attachment_chunk(client, "INBOX", "7", 0)
+        self.assertEqual(first["chunk_size"], m.MAX_CHUNK_BYTES)
+        self.assertFalse(first["eof"])
+        second = m.read_attachment_chunk(client, "INBOX", "7", 0, offset=first["next_offset"])
+        self.assertTrue(second["eof"])
+        self.assertEqual(
+            base64.b64decode(first["content_base64"]) + base64.b64decode(second["content_base64"]),
+            payload,
+        )
+
+    def test_body_chunk_roundtrip(self):
+        body = "á" * (m.MAX_CHUNK_BYTES // 2 + 10)
+        msg = EmailMessage()
+        msg["From"] = "sender@example.test"
+        msg["To"] = "me@example.test"
+        msg["Subject"] = "Large body"
+        msg["Message-ID"] = "<body@example.test>"
+        msg.set_content(body)
+        client = FakeIMAP()
+        client.messages["7"] = msg.as_bytes()
+        first = m.read_body_chunk(client, "INBOX", "7", max_bytes=4096)
+        self.assertEqual(first["chunk_size"], 4096)
+        self.assertFalse(first["eof"])
+
+    def test_read_defaults_to_attachment_metadata_only(self):
+        msg = m.build_message({
+            "to": "person@example.test",
+            "subject": "Metadata",
+            "body_text": "Hello",
+            "attachments": [{
+                "filename": "a.txt",
+                "content_type": "text/plain",
+                "content_base64": base64.b64encode(b"hi").decode(),
+            }],
+        })
+        client = FakeIMAP()
+        client.messages["7"] = msg.as_bytes()
+        with patch.object(m, "connect_imap", return_value=client):
+            data = m.execute({"action": "read", "folder": "INBOX", "uid": "7"})
+        self.assertNotIn("content_base64", data["message"]["attachments"][0])
+
     def test_reply_all_excludes_own_and_duplicates(self):
         source = EmailMessage()
         source["From"] = "sender@example.test"
