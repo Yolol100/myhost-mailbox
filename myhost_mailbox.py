@@ -20,6 +20,7 @@ MAX_ATTACHMENTS = 20
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_MESSAGE_BYTES = 50 * 1024 * 1024
 MAX_THREAD_MESSAGES = 100
+MAX_CHUNK_BYTES = 512 * 1024
 UID_RE = re.compile(r"^[1-9][0-9]*$")
 SPECIAL_FLAGS = {
     "drafts": "\\DRAFTS",
@@ -270,6 +271,52 @@ def read_attachment(client, folder: str, uid: str, index: int) -> dict:
     if len(payload) > MAX_ATTACHMENT_BYTES:
         raise ValueError("attachment exceeds 25 MiB")
     return {"index": index, "filename": part.get_filename(), "content_type": part.get_content_type(), "size": len(payload), "content_base64": base64.b64encode(payload).decode("ascii")}
+
+
+def _byte_chunk(payload: bytes, *, offset: int = 0, max_bytes: int = MAX_CHUNK_BYTES) -> dict:
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+    if max_bytes < 1 or max_bytes > MAX_CHUNK_BYTES:
+        raise ValueError(f"max_bytes must be 1-{MAX_CHUNK_BYTES}")
+    total = len(payload)
+    if offset > total:
+        raise ValueError("offset exceeds payload size")
+    end = min(total, offset + max_bytes)
+    chunk = payload[offset:end]
+    return {
+        "offset": offset,
+        "next_offset": end if end < total else None,
+        "eof": end >= total,
+        "total_size": total,
+        "chunk_size": len(chunk),
+        "content_base64": base64.b64encode(chunk).decode("ascii"),
+    }
+
+
+def read_attachment_chunk(client, folder: str, uid: str, index: int, *, offset: int = 0, max_bytes: int = MAX_CHUNK_BYTES) -> dict:
+    msg = fetch_message(client, folder, uid)
+    parts = list(msg.iter_attachments())
+    if index < 0 or index >= len(parts):
+        raise ValueError("attachment index is out of range")
+    part = parts[index]
+    payload = part.get_payload(decode=True) or b""
+    if len(payload) > MAX_ATTACHMENT_BYTES:
+        raise ValueError("attachment exceeds 25 MiB")
+    result = _byte_chunk(payload, offset=offset, max_bytes=max_bytes)
+    result.update({"index": index, "filename": part.get_filename(), "content_type": part.get_content_type()})
+    return result
+
+
+def read_body_chunk(client, folder: str, uid: str, *, kind: str = "text", offset: int = 0, max_bytes: int = MAX_CHUNK_BYTES) -> dict:
+    msg = fetch_message(client, folder, uid)
+    plain, html = _body_parts(msg)
+    kind = normalize_text(kind).casefold() or "text"
+    if kind not in {"text", "html"}:
+        raise ValueError("kind must be text or html")
+    body = plain if kind == "text" else (html or "")
+    result = _byte_chunk(body.encode("utf-8"), offset=offset, max_bytes=max_bytes)
+    result.update({"kind": kind, "encoding": "utf-8"})
+    return result
 
 
 def list_message_summaries(client, folder: str, *, unread_only: bool = False, limit: int = 50) -> list[dict]:
@@ -637,9 +684,13 @@ def execute(request: dict) -> dict:
             return {"messages": search_message_summaries(client, request.get("folder"), from_text=request.get("from"), to_text=request.get("to"), subject_text=request.get("subject"), body_text=request.get("body"), unread_only=bool(request.get("unread_only")), limit=int(request.get("limit") or 50))}
         if action == "read":
             msg = fetch_message(client, request.get("folder"), request.get("uid"))
-            return {"message": serialize_message(msg, uid=request.get("uid"), include_attachments=bool(request.get("include_attachments", True)), include_attachment_content=bool(request.get("include_attachment_content", True)))}
+            return {"message": serialize_message(msg, uid=request.get("uid"), include_attachments=bool(request.get("include_attachments", True)), include_attachment_content=bool(request.get("include_attachment_content", False)))}
         if action == "read_attachment":
             return {"attachment": read_attachment(client, request.get("folder"), request.get("uid"), int(request.get("index", 0)))}
+        if action == "read_attachment_chunk":
+            return {"attachment": read_attachment_chunk(client, request.get("folder"), request.get("uid"), int(request.get("index", 0)), offset=int(request.get("offset", 0)), max_bytes=int(request.get("max_bytes", MAX_CHUNK_BYTES)))}
+        if action == "read_body_chunk":
+            return {"body": read_body_chunk(client, request.get("folder"), request.get("uid"), kind=request.get("kind", "text"), offset=int(request.get("offset", 0)), max_bytes=int(request.get("max_bytes", MAX_CHUNK_BYTES)))}
         if action == "thread":
             return {"messages": thread_messages(client, request.get("folder"), request.get("uid"))}
         if action == "mark_read":
