@@ -8,14 +8,20 @@ use RuntimeException;
 
 final class Store
 {
-    private const REQUEST_PREFIX = 'webactueel_mailbox_request_';
-    private const RESULT_PREFIX = 'webactueel_mailbox_result_';
-    private const LOCK_PREFIX = 'webactueel_mailbox_lock_';
+    private const REQUEST_PREFIX = 'webactueel_secret_mailbox_request_';
+    private const RESULT_PREFIX = 'webactueel_secret_mailbox_result_';
+    private const LOCK_PREFIX = 'webactueel_secret_mailbox_lock_';
+    private const EXPIRY_HOOK = 'webactueel_mailbox_expire_state';
     private const DEFAULT_TTL = 3600;
     private const MAX_TTL = 86400;
     private const LOCK_TTL = 60;
     private const MAX_REQUEST_BYTES = 262144;
     private const MAX_RESULT_BYTES = 4194304;
+
+    public function register(): void
+    {
+        add_action(self::EXPIRY_HOOK, array($this, 'expireIfMatches'), 10, 2);
+    }
 
     public function putRequest(string $requestId, array $request, int $ttl = self::DEFAULT_TTL): array
     {
@@ -29,8 +35,8 @@ final class Store
 
         try {
             $key = $this->key(self::REQUEST_PREFIX, $requestId);
+            $existing = $this->activeRecord($key);
             $hash = hash('sha256', $encoded);
-            $existing = get_transient($key);
             if (is_array($existing)) {
                 $existingHash = isset($existing['sha256']) ? (string) $existing['sha256'] : '';
                 if (! hash_equals($hash, $existingHash)) {
@@ -39,18 +45,24 @@ final class Store
                 return $this->publicState($existing, false);
             }
 
+            delete_option($this->key(self::RESULT_PREFIX, $requestId));
             $now = time();
+            $generation = bin2hex(random_bytes(16));
             $record = array(
                 'request_id' => $requestId,
                 'request' => $request,
                 'sha256' => $hash,
+                'generation' => $generation,
                 'created_at' => $now,
                 'expires_at' => $now + $ttl,
             );
-            if (! set_transient($key, $record, $ttl)) {
+            if (! add_option($key, $record, '', false)) {
                 throw new RuntimeException('Mailbox request could not be stored.');
             }
-            delete_transient($this->key(self::RESULT_PREFIX, $requestId));
+            if (! $this->scheduleExpiry($requestId, $generation, (int) $record['expires_at'])) {
+                delete_option($key);
+                throw new RuntimeException('Mailbox request expiry could not be scheduled.');
+            }
             return $this->publicState($record, true);
         } finally {
             $this->releaseLock($requestId, $token);
@@ -60,7 +72,8 @@ final class Store
     public function getRequest(string $requestId): array
     {
         $this->assertRequestId($requestId);
-        $record = get_transient($this->key(self::REQUEST_PREFIX, $requestId));
+        $key = $this->key(self::REQUEST_PREFIX, $requestId);
+        $record = $this->activeRecord($key);
         if (! is_array($record) || ! isset($record['request']) || ! is_array($record['request'])) {
             throw new RuntimeException('Mailbox request was not found or expired.');
         }
@@ -80,15 +93,18 @@ final class Store
         }
 
         try {
-            $request = $this->getRequest($requestId);
+            $request = $this->activeRecord($this->key(self::REQUEST_PREFIX, $requestId));
+            if (! is_array($request)) {
+                throw new RuntimeException('Mailbox request was not found or expired.');
+            }
             $currentHash = isset($request['sha256']) ? (string) $request['sha256'] : '';
             if (! hash_equals($currentHash, $expectedRequestHash)) {
                 throw new RuntimeException('Mailbox request changed before result storage.');
             }
 
             $key = $this->key(self::RESULT_PREFIX, $requestId);
+            $existing = $this->activeRecord($key);
             $hash = hash('sha256', $encoded);
-            $existing = get_transient($key);
             if (is_array($existing)) {
                 $existingHash = isset($existing['sha256']) ? (string) $existing['sha256'] : '';
                 if (! hash_equals($hash, $existingHash)) {
@@ -97,17 +113,16 @@ final class Store
                 return $this->publicState($existing, false);
             }
 
-            $now = time();
-            $expiresAt = max($now + 60, (int) ($request['expires_at'] ?? ($now + self::DEFAULT_TTL)));
-            $ttl = min(self::MAX_TTL, max(60, $expiresAt - $now));
             $record = array(
                 'request_id' => $requestId,
+                'request_sha256' => $currentHash,
+                'generation' => (string) ($request['generation'] ?? ''),
                 'result' => $result,
                 'sha256' => $hash,
-                'created_at' => $now,
-                'expires_at' => $now + $ttl,
+                'created_at' => time(),
+                'expires_at' => (int) ($request['expires_at'] ?? time()),
             );
-            if (! set_transient($key, $record, $ttl)) {
+            if (! add_option($key, $record, '', false)) {
                 throw new RuntimeException('Mailbox result could not be stored.');
             }
             return $this->publicState($record, true);
@@ -119,7 +134,7 @@ final class Store
     public function getResult(string $requestId): array
     {
         $this->assertRequestId($requestId);
-        $record = get_transient($this->key(self::RESULT_PREFIX, $requestId));
+        $record = $this->activeRecord($this->key(self::RESULT_PREFIX, $requestId));
         if (! is_array($record) || ! isset($record['result']) || ! is_array($record['result'])) {
             return array('request_id' => $requestId, 'ready' => false);
         }
@@ -143,14 +158,74 @@ final class Store
         try {
             $requestKey = $this->key(self::REQUEST_PREFIX, $requestId);
             $resultKey = $this->key(self::RESULT_PREFIX, $requestId);
-            delete_transient($requestKey);
-            delete_transient($resultKey);
-            if (false !== get_transient($requestKey) || false !== get_transient($resultKey)) {
+            delete_option($requestKey);
+            delete_option($resultKey);
+            if (false !== get_option($requestKey, false) || false !== get_option($resultKey, false)) {
                 throw new RuntimeException('Mailbox bridge cleanup could not be verified.');
             }
         } finally {
             $this->releaseLock($requestId, $token);
         }
+    }
+
+    public function expireIfMatches($requestId, $generation): void
+    {
+        if (! is_string($requestId) || ! is_string($generation)) {
+            return;
+        }
+        try {
+            $this->assertRequestId($requestId);
+        } catch (RuntimeException $error) {
+            return;
+        }
+        if (! preg_match('/^[a-f0-9]{32}\z/', $generation)) {
+            return;
+        }
+
+        $token = $this->acquireLock($requestId);
+        if ('' === $token) {
+            return;
+        }
+        try {
+            $requestKey = $this->key(self::REQUEST_PREFIX, $requestId);
+            $request = get_option($requestKey, false);
+            if (
+                is_array($request)
+                && hash_equals((string) ($request['generation'] ?? ''), $generation)
+                && (int) ($request['expires_at'] ?? 0) <= time()
+            ) {
+                delete_option($requestKey);
+                delete_option($this->key(self::RESULT_PREFIX, $requestId));
+            }
+        } finally {
+            $this->releaseLock($requestId, $token);
+        }
+    }
+
+    private function activeRecord(string $key): ?array
+    {
+        $record = get_option($key, false);
+        if (! is_array($record)) {
+            return null;
+        }
+        if ((int) ($record['expires_at'] ?? 0) <= time()) {
+            delete_option($key);
+            return null;
+        }
+        return $record;
+    }
+
+    private function scheduleExpiry(string $requestId, string $generation, int $expiresAt): bool
+    {
+        if (! function_exists('wp_schedule_single_event')) {
+            return false;
+        }
+        return true === wp_schedule_single_event(
+            $expiresAt,
+            self::EXPIRY_HOOK,
+            array($requestId, $generation),
+            false
+        );
     }
 
     private function publicState(array $record, bool $created): array
