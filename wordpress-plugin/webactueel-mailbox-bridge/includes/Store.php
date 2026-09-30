@@ -134,18 +134,40 @@ final class Store
     public function getResult(string $requestId): array
     {
         $this->assertRequestId($requestId);
-        $record = $this->activeRecord($this->key(self::RESULT_PREFIX, $requestId));
-        if (! is_array($record) || ! isset($record['result']) || ! is_array($record['result'])) {
-            return array('request_id' => $requestId, 'ready' => false);
+        $token = $this->acquireLock($requestId);
+        if ('' === $token) {
+            throw new RuntimeException('Mailbox request state is busy. Retry later.');
         }
-        return array(
-            'request_id' => $requestId,
-            'ready' => true,
-            'sha256' => (string) ($record['sha256'] ?? ''),
-            'created_at' => (int) ($record['created_at'] ?? 0),
-            'expires_at' => (int) ($record['expires_at'] ?? 0),
-            'result' => $record['result'],
-        );
+
+        try {
+            $key = $this->key(self::RESULT_PREFIX, $requestId);
+            $record = $this->activeRecord($key);
+            if (! is_array($record) || ! isset($record['result']) || ! is_array($record['result'])) {
+                return array('request_id' => $requestId, 'ready' => false);
+            }
+
+            if ((int) ($record['read_at'] ?? 0) <= 0) {
+                $record['read_at'] = time();
+                if (! update_option($key, $record, false)) {
+                    $stored = get_option($key, false);
+                    if (! is_array($stored) || (int) ($stored['read_at'] ?? 0) <= 0) {
+                        throw new RuntimeException('Mailbox result read state could not be persisted.');
+                    }
+                    $record = $stored;
+                }
+            }
+
+            return array(
+                'request_id' => $requestId,
+                'ready' => true,
+                'sha256' => (string) ($record['sha256'] ?? ''),
+                'created_at' => (int) ($record['created_at'] ?? 0),
+                'expires_at' => (int) ($record['expires_at'] ?? 0),
+                'result' => $record['result'],
+            );
+        } finally {
+            $this->releaseLock($requestId, $token);
+        }
     }
 
     public function clear(string $requestId): void
@@ -158,6 +180,11 @@ final class Store
         try {
             $requestKey = $this->key(self::REQUEST_PREFIX, $requestId);
             $resultKey = $this->key(self::RESULT_PREFIX, $requestId);
+            $result = $this->activeRecord($resultKey);
+            if (! is_array($result) || (int) ($result['read_at'] ?? 0) <= 0) {
+                throw new RuntimeException('Mailbox result must be read before state can be cleared.');
+            }
+
             delete_option($requestKey);
             delete_option($resultKey);
             if (false !== get_option($requestKey, false) || false !== get_option($resultKey, false)) {
