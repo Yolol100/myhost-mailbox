@@ -27,5 +27,6 @@ require_once WEBACTUEEL_MAILBOX_BRIDGE_PATH . 'includes/Oidc.php';
 require_once WEBACTUEEL_MAILBOX_BRIDGE_PATH . 'includes/Rest.php';
 
 $store = new Store();
+$store->register();
 $oidc = new Oidc();
 (new Rest($store, $oidc))->register();
