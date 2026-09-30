@@ -15,15 +15,17 @@ class FakeIMAP:
         self.uid_calls = []
         self.appended = []
         self.search_result = b"7"
-        self.messages = {"7": self._raw("hello", "Body")}
+        self.messages = {"7": self._raw("hello", "Body", "<m1@example.test>")}
 
     @staticmethod
-    def _raw(subject, body):
+    def _raw(subject, body, message_id, *, in_reply_to=None):
         msg = EmailMessage()
         msg["From"] = "sender@example.test"
         msg["To"] = "me@example.test"
         msg["Subject"] = subject
-        msg["Message-ID"] = "<m1@example.test>"
+        msg["Message-ID"] = message_id
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
         msg.set_content(body)
         return msg.as_bytes()
 
@@ -31,7 +33,13 @@ class FakeIMAP:
         return "OK", [self.caps]
 
     def list(self):
-        return "OK", [b'(\\HasNoChildren) "/" "INBOX"', b'(\\HasNoChildren \\Drafts) "/" "Drafts"']
+        return "OK", [
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasNoChildren \\Drafts) "/" "Drafts"',
+            b'(\\HasNoChildren \\Sent) "/" "Sent"',
+            b'(\\HasNoChildren \\Archive) "/" "Archive"',
+            b'(\\HasNoChildren \\Trash) "/" "Trash"',
+        ]
 
     def select(self, folder, readonly=True):
         return "OK", [b"1"]
@@ -76,13 +84,23 @@ class FakeSMTP:
 
 
 class MailboxTests(unittest.TestCase):
+    def test_special_folder_detection(self):
+        client = FakeIMAP()
+        self.assertEqual(m.find_special_folder(client, "drafts"), "Drafts")
+        self.assertEqual(m.find_special_folder(client, "sent"), "Sent")
+        self.assertEqual(m.find_special_folder(client, "archive"), "Archive")
+
     def test_list_search_read(self):
         client = FakeIMAP()
-        self.assertEqual(m.list_folders(client), ["INBOX", "Drafts"])
         self.assertEqual(m.list_message_uids(client, "INBOX"), ["7"])
-        self.assertEqual(m.search_messages(client, "INBOX", subject_text="hello"), ["7"])
+        self.assertEqual(m.search_message_uids(client, "INBOX", subject_text="hello"), ["7"])
         msg = m.fetch_message(client, "INBOX", "7")
         self.assertEqual(m.serialize_message(msg)["body_text"], "Body")
+
+    def test_list_summaries(self):
+        rows = m.list_message_summaries(FakeIMAP(), "INBOX")
+        self.assertEqual(rows[0]["uid"], "7")
+        self.assertEqual(rows[0]["subject"], "hello")
 
     def test_safe_delete_requires_uidplus(self):
         client = FakeIMAP(caps=b"IMAP4rev1")
@@ -93,8 +111,7 @@ class MailboxTests(unittest.TestCase):
     def test_safe_delete_uses_uid_expunge(self):
         client = FakeIMAP()
         m.delete_message(client, "INBOX", "7")
-        commands = [call[0] for call in client.uid_calls]
-        self.assertEqual(commands[-2:], ["store", "expunge"])
+        self.assertEqual([call[0] for call in client.uid_calls][-2:], ["store", "expunge"])
 
     def test_move_prefers_move_capability(self):
         client = FakeIMAP()
@@ -103,7 +120,11 @@ class MailboxTests(unittest.TestCase):
 
     def test_append_draft_has_exact_readback(self):
         client = FakeIMAP()
-        uid = m.append_draft(client, "Drafts", {"to": "person@example.test", "subject": "Test", "body_text": "Hello"})
+        uid = m.append_draft(client, "Drafts", {
+            "to": "person@example.test",
+            "subject": "Test",
+            "body_text": "Hello",
+        })
         self.assertEqual(uid, "7")
         self.assertIn(b"X-Webactueel-Mailbox-Operation-ID:", client.appended[0][2])
 
@@ -111,14 +132,22 @@ class MailboxTests(unittest.TestCase):
         client = FakeIMAP()
         client.search_result = b"7 8"
         with self.assertRaises(m.UnknownOutcomeError):
-            m.append_draft(client, "Drafts", {"to": "person@example.test", "subject": "Test", "body_text": "Hello"})
+            m.append_draft(client, "Drafts", {
+                "to": "person@example.test",
+                "subject": "Test",
+                "body_text": "Hello",
+            })
 
     def test_attachment_limits_on_write(self):
-        too_many = [{"filename": "a.bin", "content_base64": ""}] * 21
         with self.assertRaises(ValueError):
-            m.build_message({"to": "person@example.test", "subject": "Test", "body_text": "Hello", "attachments": too_many})
+            m.build_message({
+                "to": "person@example.test",
+                "subject": "Test",
+                "body_text": "Hello",
+                "attachments": [{"filename": "a.bin", "content_base64": ""}] * 21,
+            })
 
-    def test_attachment_metadata_without_content(self):
+    def test_attachment_read_by_index(self):
         msg = m.build_message({
             "to": "person@example.test",
             "subject": "Test",
@@ -129,11 +158,13 @@ class MailboxTests(unittest.TestCase):
                 "content_base64": base64.b64encode(b"hi").decode(),
             }],
         })
-        data = m.serialize_message(msg, include_attachment_content=False)
-        self.assertEqual(data["attachments"][0]["size"], 2)
-        self.assertNotIn("content_base64", data["attachments"][0])
+        client = FakeIMAP()
+        client.messages["7"] = msg.as_bytes()
+        item = m.read_attachment(client, "INBOX", "7", 0)
+        self.assertEqual(item["filename"], "a.txt")
+        self.assertEqual(base64.b64decode(item["content_base64"]), b"hi")
 
-    def test_reply_all_excludes_own_address_and_duplicates(self):
+    def test_reply_all_excludes_own_and_duplicates(self):
         source = EmailMessage()
         source["From"] = "sender@example.test"
         source["To"] = "me@example.test, other@example.test"
@@ -141,27 +172,89 @@ class MailboxTests(unittest.TestCase):
         source["Subject"] = "Question"
         source["Message-ID"] = "<x@example.test>"
         source.set_content("Original")
-        with patch.dict(os.environ, {"OUTREACH_MAIL_USER": "me@example.test", "OUTREACH_SENDER_EMAIL": "me@example.test"}, clear=False):
+        with patch.dict(os.environ, {
+            "OUTREACH_MAIL_USER": "me@example.test",
+            "OUTREACH_SENDER_EMAIL": "me@example.test",
+        }, clear=False):
             reply = m.reply_payload(source, "Answer", reply_all=True)
         self.assertEqual(reply["to"], ["sender@example.test"])
         self.assertEqual(reply["cc"], ["other@example.test", "third@example.test"])
+
+    def test_forward_preserves_attachment(self):
+        source = m.build_message({
+            "to": "me@example.test",
+            "subject": "Question",
+            "body_text": "Original",
+            "attachments": [{
+                "filename": "a.txt",
+                "content_type": "text/plain",
+                "content_base64": base64.b64encode(b"hi").decode(),
+            }],
+        })
+        source.replace_header("From", "sender@example.test")
+        payload = m.forward_payload(source, "other@example.test", "FYI")
+        self.assertEqual(payload["attachments"][0]["filename"], "a.txt")
 
     def test_send_requires_double_gate(self):
         payload = {"to": "person@example.test", "subject": "Test", "body_text": "Hello"}
         with patch.dict(os.environ, {m.SEND_ENABLE_ENV: "false"}, clear=False):
             with self.assertRaises(RuntimeError):
-                m.send_message(payload, confirm_send=True, smtp_factory=lambda: FakeSMTP())
+                m.send_message(
+                    payload,
+                    confirm_send=True,
+                    smtp_factory=lambda: FakeSMTP(),
+                    imap_factory=lambda: FakeIMAP(),
+                )
         with patch.dict(os.environ, {m.SEND_ENABLE_ENV: "true"}, clear=False):
             with self.assertRaises(RuntimeError):
-                m.send_message(payload, confirm_send=False, smtp_factory=lambda: FakeSMTP())
+                m.send_message(
+                    payload,
+                    confirm_send=False,
+                    smtp_factory=lambda: FakeSMTP(),
+                    imap_factory=lambda: FakeIMAP(),
+                )
 
-    def test_send_explicit_success(self):
+    def test_send_saves_sent_copy(self):
         payload = {"to": "person@example.test", "subject": "Test", "body_text": "Hello"}
         smtp = FakeSMTP()
+        imap = FakeIMAP()
         with patch.dict(os.environ, {m.SEND_ENABLE_ENV: "true"}, clear=False):
-            result = m.send_message(payload, confirm_send=True, smtp_factory=lambda: smtp)
+            result = m.send_message(
+                payload,
+                confirm_send=True,
+                smtp_factory=lambda: smtp,
+                imap_factory=lambda: imap,
+            )
         self.assertTrue(result["sent"])
+        self.assertTrue(result["sent_copy"])
         self.assertEqual(len(smtp.sent), 1)
+        self.assertEqual(imap.appended[0][0], "Sent")
+
+    def test_thread_finds_parent_and_child(self):
+        client = FakeIMAP()
+        client.messages = {
+            "5": client._raw("Thread", "Parent", "<p@example.test>"),
+            "7": client._raw("Thread", "Root", "<r@example.test>", in_reply_to="<p@example.test>"),
+            "9": client._raw("Thread", "Child", "<c@example.test>", in_reply_to="<r@example.test>"),
+        }
+
+        def uid(command, *args):
+            client.uid_calls.append((command.lower(), args))
+            command = command.lower()
+            if command == "fetch":
+                return "OK", [(b"x", client.messages[str(args[0])])]
+            if command == "search":
+                joined = " ".join(str(x) for x in args)
+                if "Message-ID" in joined and "p@example.test" in joined:
+                    return "OK", [b"5"]
+                if "In-Reply-To" in joined and "r@example.test" in joined:
+                    return "OK", [b"9"]
+                return "OK", [b""]
+            return "OK", [b""]
+
+        client.uid = uid
+        rows = m.thread_messages(client, "INBOX", "7")
+        self.assertEqual({row["uid"] for row in rows}, {"5", "7", "9"})
 
     def test_rejects_invalid_uid_before_mutation(self):
         client = FakeIMAP()
