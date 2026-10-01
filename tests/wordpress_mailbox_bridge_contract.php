@@ -106,7 +106,7 @@ $uninstall = file_get_contents($root . '/wordpress-plugin/webactueel-mailbox-bri
 $bootstrap = file_get_contents($root . '/wordpress-plugin/webactueel-mailbox-bridge/webactueel-mailbox-bridge.php');
 
 foreach (array(
-    "PRIVATE_REPOSITORY = 'Yolol100/wordpressconnector'",
+    "PRIVATE_REPOSITORY = 'Yolol100/Wordpress'",
     "EXECUTOR_REPOSITORY = 'Yolol100/Leadscanner'",
     'mailbox-private-bridge.yml@refs/heads/main',
     'mailbox-execute.yml@refs/heads/main',
@@ -150,7 +150,7 @@ foreach (array(
     }
 }
 
-if (false === strpos((string) $bootstrap, 'Version: 0.1.0') || false === strpos((string) $bootstrap, '$store->register();')) {
+if (false === strpos((string) $bootstrap, 'Version: 0.1.1') || false === strpos((string) $bootstrap, '$store->register();')) {
     fwrite(STDERR, "plugin version missing\n"); exit(1);
 }
 if (preg_match('/(OUTREACH_MAIL_PASSWORD|BEGIN PRIVATE KEY|api[_-]?key\s*=)/i', (string) $oidc . (string) $rest . (string) $bootstrap)) {
