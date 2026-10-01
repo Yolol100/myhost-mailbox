@@ -338,13 +338,15 @@ def _search_value(value: object) -> str:
     return text.replace('"', "")
 
 
-def search_message_uids(client, folder: str, *, from_text: str | None = None, to_text: str | None = None, subject_text: str | None = None, body_text: str | None = None, unread_only: bool = False, limit: int = 50) -> list[str]:
+def search_message_uids(client, folder: str, *, from_text: str | None = None, to_text: str | None = None, subject_text: str | None = None, body_text: str | None = None, unread_only: bool = False, flagged_only: bool = False, limit: int = 50) -> list[str]:
     if limit < 1 or limit > 500:
         raise ValueError("limit must be 1-500")
     select_folder(client, folder, readonly=True)
     criteria: list[str] = []
     if unread_only:
         criteria.append("UNSEEN")
+    if flagged_only:
+        criteria.append("FLAGGED")
     for key, value in (("FROM", from_text), ("TO", to_text), ("SUBJECT", subject_text), ("BODY", body_text)):
         value = _search_value(value)
         if value:
@@ -688,7 +690,7 @@ def execute(request: dict) -> dict:
         if action == "list_messages":
             return {"messages": list_message_summaries(client, request.get("folder"), unread_only=bool(request.get("unread_only")), limit=int(request.get("limit") or 50))}
         if action == "search":
-            return {"messages": search_message_summaries(client, request.get("folder"), from_text=request.get("from"), to_text=request.get("to"), subject_text=request.get("subject"), body_text=request.get("body"), unread_only=bool(request.get("unread_only")), limit=int(request.get("limit") or 50))}
+            return {"messages": search_message_summaries(client, request.get("folder"), from_text=request.get("from"), to_text=request.get("to"), subject_text=request.get("subject"), body_text=request.get("body"), unread_only=bool(request.get("unread_only")), flagged_only=bool(request.get("flagged_only")), limit=int(request.get("limit") or 50))}
         if action == "read":
             msg = fetch_message(client, request.get("folder"), request.get("uid"))
             return {"message": serialize_message(msg, uid=request.get("uid"), include_attachments=bool(request.get("include_attachments", True)), include_attachment_content=bool(request.get("include_attachment_content", False)))}
