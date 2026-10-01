@@ -108,13 +108,18 @@ def parse_folder_row(raw: bytes) -> dict:
     text = raw.decode("utf-8", errors="replace")
     flag_match = re.match(r"^\(([^)]*)\)", text)
     flags = [] if not flag_match else [item.upper() for item in flag_match.group(1).split()]
-    if '"' in text:
-        end = text.rfind('"')
-        start = text.rfind('"', 0, end)
-        name = text[start + 1 : end].replace('\\"', '"') if start >= 0 else text.split()[-1].strip('"')
-    else:
-        name = text.split()[-1].strip('"')
-    return {"name": name, "flags": flags}
+    rest = text[flag_match.end() :].strip() if flag_match else text.strip()
+    token_pattern = re.compile(r'"((?:\\.|[^"])*)"|([^\\s]+)')
+    tokens = []
+    for match in token_pattern.finditer(rest):
+        if match.group(1) is not None:
+            token = re.sub(r'\\(["\\\\])', r'\1', match.group(1))
+        else:
+            token = match.group(2)
+        tokens.append(token)
+    if len(tokens) < 2:
+        raise RuntimeError("Could not parse IMAP LIST response")
+    return {"name": tokens[1], "flags": flags}
 
 
 def list_folder_info(client) -> list[dict]:
