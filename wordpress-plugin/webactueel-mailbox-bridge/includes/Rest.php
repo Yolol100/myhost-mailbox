@@ -10,7 +10,7 @@ use Throwable;
 final class Rest
 {
     private const NAMESPACE = 'webactueel-mailbox-bridge/v1';
-    private const MAX_REQUEST_BODY_BYTES = 300000;
+    private const MAX_REQUEST_BODY_BYTES = 400000;
     private const MAX_RESULT_BODY_BYTES = 4194304;
 
     private const ACTIONS = array(
@@ -24,11 +24,13 @@ final class Rest
 
     private Store $store;
     private Oidc $oidc;
+    private Crypto $crypto;
 
-    public function __construct(Store $store, Oidc $oidc)
+    public function __construct(Store $store, Oidc $oidc, Crypto $crypto)
     {
         $this->store = $store;
         $this->oidc = $oidc;
+        $this->crypto = $crypto;
     }
 
     public function register(): void
@@ -38,6 +40,12 @@ final class Rest
 
     public function registerRoutes(): void
     {
+        register_rest_route(self::NAMESPACE, '/crypto-key', array(
+            'methods' => \WP_REST_Server::READABLE,
+            'callback' => array($this, 'publicKey'),
+            'permission_callback' => array($this, 'allowPublicKey'),
+        ));
+
         register_rest_route(self::NAMESPACE, '/requests/(?P<request_id>[A-Za-z0-9][A-Za-z0-9._-]{7,99})', array(
             array(
                 'methods' => \WP_REST_Server::CREATABLE,
@@ -81,36 +89,66 @@ final class Rest
         return $this->authorize($request, 'executor');
     }
 
+    public function allowPublicKey(\WP_REST_Request $request)
+    {
+        if (! is_ssl()) {
+            return new \WP_Error('mailbox_https_required', 'Mailbox bridge requires HTTPS.', array('status' => 403));
+        }
+        return true;
+    }
+
+    public function publicKey(\WP_REST_Request $request): \WP_REST_Response
+    {
+        return new \WP_REST_Response($this->crypto->publicKeyPayload(), 200);
+    }
+
     public function storeRequest(\WP_REST_Request $request)
     {
         $body = (string) $request->get_body();
         if ('' === $body || strlen($body) > self::MAX_REQUEST_BODY_BYTES) {
-            return new \WP_Error('mailbox_request_size', 'Mailbox request is empty or too large.', array('status' => 413));
+            return new \WP_Error('mailbox_request_size', 'Encrypted mailbox request is empty or too large.', array('status' => 413));
+        }
+
+        $envelope = $request->get_json_params();
+        if (! is_array($envelope)) {
+            return new \WP_Error('mailbox_request_json', 'Encrypted mailbox request must be a JSON object.', array('status' => 400));
         }
 
         try {
-            $shape = json_decode($body, false, 32, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $error) {
-            return new \WP_Error('mailbox_request_json', 'Mailbox request must be valid JSON.', array('status' => 400));
-        }
-        if (! is_object($shape)) {
-            return new \WP_Error('mailbox_request_json', 'Mailbox request must be a JSON object.', array('status' => 400));
-        }
+            $data = $this->crypto->decryptRequestEnvelope($envelope);
+            $allowed = array('request_id', 'request', 'ttl', 'response_public_key_pem');
+            foreach (array_keys($data) as $key) {
+                if (! in_array((string) $key, $allowed, true)) {
+                    throw new RuntimeException('Encrypted mailbox request plaintext contains an unsupported key.');
+                }
+            }
+            foreach ($allowed as $required) {
+                if (! array_key_exists($required, $data)) {
+                    throw new RuntimeException('Encrypted mailbox request plaintext is incomplete.');
+                }
+            }
 
-        $data = $request->get_json_params();
-        if (! is_array($data) || ! isset($data['request']) || ! is_array($data['request'])) {
-            return new \WP_Error('mailbox_request_shape', 'Mailbox request payload is invalid.', array('status' => 400));
-        }
-
-        $mailRequest = $data['request'];
-        try {
-            $this->assertMailboxRequest($mailRequest);
             $requestId = (string) $request->get_param('request_id');
-            $ttl = isset($data['ttl']) ? (int) $data['ttl'] : 3600;
-            $stored = $this->store->putRequest($requestId, $mailRequest, $ttl);
+            if (! isset($data['request_id']) || ! is_string($data['request_id']) || ! hash_equals($requestId, $data['request_id'])) {
+                throw new RuntimeException('Encrypted mailbox request_id does not match the route.');
+            }
+            if (! isset($data['request']) || ! is_array($data['request'])) {
+                throw new RuntimeException('Encrypted mailbox request payload is invalid.');
+            }
+            if (is_bool($data['ttl']) || ! is_int($data['ttl']) || $data['ttl'] < 60 || $data['ttl'] > 86400) {
+                throw new RuntimeException('Encrypted mailbox request ttl must be an integer from 60 to 86400.');
+            }
+            if (! isset($data['response_public_key_pem']) || ! is_string($data['response_public_key_pem'])) {
+                throw new RuntimeException('Encrypted mailbox response public key is missing.');
+            }
+
+            $mailRequest = $data['request'];
+            $this->assertMailboxRequest($mailRequest);
+            $responsePublicKey = $this->crypto->normalizeClientPublicKey($data['response_public_key_pem']);
+            $stored = $this->store->putRequest($requestId, $mailRequest, $data['ttl'], $responsePublicKey);
             return new \WP_REST_Response(array('ok' => true, 'stored' => $stored), 201);
         } catch (Throwable $error) {
-            return new \WP_Error('mailbox_request_rejected', $error->getMessage(), array('status' => 400));
+            return new \WP_Error('mailbox_request_rejected', 'Encrypted mailbox request was rejected.', array('status' => 400));
         }
     }
 
@@ -165,7 +203,16 @@ final class Rest
     {
         try {
             $requestId = (string) $request->get_param('request_id');
-            return new \WP_REST_Response($this->store->getResult($requestId), 200);
+            $result = $this->store->getResult($requestId);
+            if (empty($result['ready'])) {
+                return new \WP_Error('mailbox_result_unavailable', 'Mailbox result is unavailable.', array('status' => 404));
+            }
+            $responsePublicKey = $this->store->getResponsePublicKey($requestId);
+            return new \WP_REST_Response(array(
+                'request_id' => $requestId,
+                'encrypted' => true,
+                'envelope' => $this->crypto->encryptResultEnvelope($result, $responsePublicKey),
+            ), 200);
         } catch (Throwable $error) {
             return new \WP_Error('mailbox_result_unavailable', 'Mailbox result is unavailable.', array('status' => 404));
         }
