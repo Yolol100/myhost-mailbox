@@ -34,11 +34,11 @@ class FakeIMAP:
 
     def list(self):
         return "OK", [
-            b'(\\HasNoChildren) "/" "INBOX"',
-            b'(\\HasNoChildren \\Drafts) "/" "Drafts"',
-            b'(\\HasNoChildren \\Sent) "/" "Sent"',
-            b'(\\HasNoChildren \\Archive) "/" "Archive"',
-            b'(\\HasNoChildren \\Trash) "/" "Trash"',
+            b'(\\HasNoChildren) "." INBOX',
+            b'(\\HasNoChildren \\Drafts) "." Drafts',
+            b'(\\HasNoChildren \\Sent) "." Sent',
+            b'(\\HasNoChildren \\Archive) "." Archive',
+            b'(\\HasNoChildren \\Trash) "." Trash',
         ]
 
     def select(self, folder, readonly=True):
@@ -84,6 +84,16 @@ class FakeSMTP:
 
 
 class MailboxTests(unittest.TestCase):
+    def test_parse_folder_row_supports_quoted_and_unquoted_mailboxes(self):
+        self.assertEqual(
+            m.parse_folder_row(b'(\\HasNoChildren) "." INBOX'),
+            {"name": "INBOX", "flags": ["\\HASNOCHILDREN"]},
+        )
+        self.assertEqual(
+            m.parse_folder_row(b'(\\HasNoChildren) "/" "Project Files"'),
+            {"name": "Project Files", "flags": ["\\HASNOCHILDREN"]},
+        )
+
     def test_special_folder_detection(self):
         client = FakeIMAP()
         self.assertEqual(m.find_special_folder(client, "drafts"), "Drafts")
