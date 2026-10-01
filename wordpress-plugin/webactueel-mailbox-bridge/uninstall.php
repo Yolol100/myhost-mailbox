@@ -8,9 +8,11 @@ if (! defined('WP_UNINSTALL_PLUGIN')) {
 
 $cleanup = static function (): void {
     delete_transient('webactueel_mailbox_oidc_jwks_v1');
+    delete_transient('webactueel_mailbox_controller_sha_v1');
     delete_transient('webactueel_mailbox_executor_sha_v1');
     delete_transient('webactueel_mailbox_jti_cleanup_v1');
     delete_option('webactueel_mailbox_jwks_refresh_after_v1');
+    delete_option('webactueel_secret_mailbox_crypto_key_v1');
     if (function_exists('wp_clear_scheduled_hook')) {
         wp_clear_scheduled_hook('webactueel_mailbox_expire_state');
     }
