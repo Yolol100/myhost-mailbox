@@ -8,8 +8,10 @@ define('HOUR_IN_SECONDS', 3600);
 $GLOBALS['bridge_oidc_transients'] = array();
 $GLOBALS['bridge_oidc_options'] = array();
 $GLOBALS['bridge_oidc_jwks'] = array();
+$GLOBALS['bridge_controller_main_sha'] = '22965800c666e00191f0c143585e84017e66cb02';
 $GLOBALS['bridge_executor_main_sha'] = '11965800c666e00191f0c143585e84017e66cb01';
 $GLOBALS['bridge_remote_jwks_calls'] = 0;
+$GLOBALS['bridge_remote_controller_calls'] = 0;
 $GLOBALS['bridge_remote_executor_calls'] = 0;
 
 class WP_REST_Request
@@ -71,6 +73,13 @@ function delete_option($key): bool { unset($GLOBALS['bridge_oidc_options'][$key]
 function wp_cache_delete($key, $group = ''): bool { return true; }
 
 function wp_safe_remote_get($url, $args = array()) {
+    if (false !== strpos((string) $url, '/wordpressconnector/commits/main')) {
+        ++$GLOBALS['bridge_remote_controller_calls'];
+        return array(
+            'response' => array('code' => 200),
+            'body' => json_encode(array('sha' => $GLOBALS['bridge_controller_main_sha'])),
+        );
+    }
     if (false !== strpos((string) $url, '/Leadscanner/commits/main')) {
         ++$GLOBALS['bridge_remote_executor_calls'];
         return array(
@@ -151,8 +160,9 @@ $privateClaims = static function () use ($baseClaims): array {
     return array_merge($baseClaims(), array(
         'repository' => 'Yolol100/wordpressconnector',
         'repository_id' => '1341990468',
-        'repository_visibility' => 'private',
+        'repository_visibility' => 'public',
         'workflow_ref' => 'Yolol100/wordpressconnector/.github/workflows/mailbox-private-bridge.yml@refs/heads/main',
+        'sha' => $GLOBALS['bridge_controller_main_sha'],
     ));
 };
 
@@ -168,11 +178,11 @@ $executorClaims = static function () use ($baseClaims): array {
 
 $auth = new Oidc();
 
-$before = $GLOBALS['bridge_remote_jwks_calls'] + $GLOBALS['bridge_remote_executor_calls'];
+$before = $GLOBALS['bridge_remote_jwks_calls'] + $GLOBALS['bridge_remote_controller_calls'] + $GLOBALS['bridge_remote_executor_calls'];
 if ($auth->authenticateExecutor(new WP_REST_Request(array()))) {
     fwrite(STDERR, "missing executor token was accepted\n"); exit(1);
 }
-$after = $GLOBALS['bridge_remote_jwks_calls'] + $GLOBALS['bridge_remote_executor_calls'];
+$after = $GLOBALS['bridge_remote_jwks_calls'] + $GLOBALS['bridge_remote_controller_calls'] + $GLOBALS['bridge_remote_executor_calls'];
 if ($after !== $before) {
     fwrite(STDERR, "missing executor token triggered remote lookup\n"); exit(1);
 }
@@ -184,6 +194,18 @@ if (! $auth->authenticatePrivate(new WP_REST_Request(array('x-webactueel-github-
 }
 if (1 !== $GLOBALS['bridge_remote_jwks_calls']) {
     fwrite(STDERR, "initial OIDC authentication did not perform exactly one JWKS fetch\n"); exit(1);
+}
+if (1 !== $GLOBALS['bridge_remote_controller_calls']) {
+    fwrite(STDERR, "controller revision lookup count mismatch\n"); exit(1);
+}
+
+try {
+    $bad = $privateClaims();
+    $bad['sha'] = str_repeat('2', 40);
+    $auth->authenticatePrivate(new WP_REST_Request(array('x-webactueel-github-oidc' => $token($bad))));
+    fwrite(STDERR, "stale controller SHA accepted\n"); exit(1);
+} catch (RuntimeException $error) {
+    if (false === strpos($error->getMessage(), 'sha')) { throw $error; }
 }
 
 try {
