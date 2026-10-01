@@ -27,21 +27,28 @@ final class Oidc
     private const JWKS_REFRESH_OPTION = 'webactueel_mailbox_jwks_refresh_after_v1';
     private const JTI_PREFIX = 'webactueel_secret_mailbox_jti_';
     private const JTI_CLEANUP_TRANSIENT = 'webactueel_mailbox_jti_cleanup_v1';
+    private const CONTROLLER_SHA_TRANSIENT = 'webactueel_mailbox_controller_sha_v1';
     private const EXECUTOR_SHA_TRANSIENT = 'webactueel_mailbox_executor_sha_v1';
 
     public function authenticatePrivate(\WP_REST_Request $request): bool
     {
-        return $this->authenticateExpected($request, array(
-            'repository' => self::PRIVATE_REPOSITORY,
-            'repository_id' => self::PRIVATE_REPOSITORY_ID,
-            'repository_owner_id' => self::OWNER_ID,
-            'actor_id' => self::OWNER_ID,
-            'repository_visibility' => 'private',
-            'ref' => 'refs/heads/main',
-            'workflow_ref' => self::PRIVATE_WORKFLOW_REF,
-            'event_name' => 'issues',
-            'runner_environment' => 'github-hosted',
-        ));
+        return $this->authenticateExpected(
+            $request,
+            array(
+                'repository' => self::PRIVATE_REPOSITORY,
+                'repository_id' => self::PRIVATE_REPOSITORY_ID,
+                'repository_owner_id' => self::OWNER_ID,
+                'actor_id' => self::OWNER_ID,
+                'repository_visibility' => 'public',
+                'ref' => 'refs/heads/main',
+                'workflow_ref' => self::PRIVATE_WORKFLOW_REF,
+                'event_name' => 'issues',
+                'runner_environment' => 'github-hosted',
+            ),
+            function (): array {
+                return array('sha' => $this->controllerMainSha());
+            }
+        );
     }
 
     public function authenticateExecutor(\WP_REST_Request $request): bool
@@ -188,6 +195,43 @@ final class Oidc
                 delete_option($name);
             }
         }
+    }
+
+    private function controllerMainSha(): string
+    {
+        $cached = get_transient(self::CONTROLLER_SHA_TRANSIENT);
+        if (is_string($cached) && preg_match('/^[a-f0-9]{40}\z/', $cached)) {
+            return $cached;
+        }
+
+        $response = wp_safe_remote_get('https://api.github.com/repos/Yolol100/wordpressconnector/commits/main', array(
+            'timeout' => 5,
+            'redirection' => 0,
+            'sslverify' => true,
+            'headers' => array(
+                'Accept' => 'application/vnd.github+json',
+                'User-Agent' => 'Webactueel-Mailbox-Bridge',
+                'X-GitHub-Api-Version' => '2026-03-10',
+            ),
+        ));
+        if (is_wp_error($response) || 200 !== (int) wp_remote_retrieve_response_code($response)) {
+            throw new RuntimeException('Trusted mailbox controller revision could not be fetched.');
+        }
+        $body = (string) wp_remote_retrieve_body($response);
+        if ('' === $body || strlen($body) > 262144) {
+            throw new RuntimeException('Trusted mailbox controller revision response is invalid.');
+        }
+        try {
+            $decoded = json_decode($body, true, 32, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $error) {
+            throw new RuntimeException('Trusted mailbox controller revision response is invalid JSON.');
+        }
+        $sha = isset($decoded['sha']) && is_string($decoded['sha']) ? strtolower($decoded['sha']) : '';
+        if (! preg_match('/^[a-f0-9]{40}\z/', $sha)) {
+            throw new RuntimeException('Trusted mailbox controller revision is invalid.');
+        }
+        set_transient(self::CONTROLLER_SHA_TRANSIENT, $sha, 60);
+        return $sha;
     }
 
     private function executorMainSha(): string
