@@ -118,6 +118,8 @@ class MailboxTests(unittest.TestCase):
         client = FakeIMAP()
         self.assertEqual(m.list_message_uids(client, "INBOX"), ["7"])
         self.assertEqual(m.search_message_uids(client, "INBOX", subject_text="hello"), ["7"])
+        self.assertEqual(m.search_message_uids(client, "INBOX", flagged_only=True), ["7"])
+        self.assertIn("FLAGGED", client.uid_calls[-1][1])
         msg = m.fetch_message(client, "INBOX", "7")
         self.assertEqual(m.serialize_message(msg)["body_text"], "Body")
 
