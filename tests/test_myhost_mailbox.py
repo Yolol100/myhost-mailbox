@@ -84,6 +84,20 @@ class FakeSMTP:
 
 
 class MailboxTests(unittest.TestCase):
+    def test_parse_folder_row_supports_unquoted_mailbox_atom(self):
+        row = m.parse_folder_row(b'(\\HasNoChildren) "." INBOX')
+        self.assertEqual(row["name"], "INBOX")
+        self.assertEqual(row["flags"], ["\\HASNOCHILDREN"])
+
+    def test_parse_folder_row_keeps_quoted_mailbox_with_spaces(self):
+        row = m.parse_folder_row(b'(\\HasNoChildren \\Sent) "/" "Sent Items"')
+        self.assertEqual(row["name"], "Sent Items")
+        self.assertIn("\\SENT", row["flags"])
+
+    def test_parse_folder_row_rejects_malformed_response(self):
+        with self.assertRaises(ValueError):
+            m.parse_folder_row(b'broken-list-row')
+
     def test_parse_folder_row_supports_quoted_and_unquoted_mailboxes(self):
         self.assertEqual(
             m.parse_folder_row(b'(\\HasNoChildren) "." INBOX'),
