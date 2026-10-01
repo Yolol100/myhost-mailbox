@@ -109,7 +109,7 @@ def parse_folder_row(raw: bytes) -> dict:
     flag_match = re.match(r"^\(([^)]*)\)", text)
     flags = [] if not flag_match else [item.upper() for item in flag_match.group(1).split()]
     rest = text[flag_match.end() :].strip() if flag_match else text.strip()
-    token_pattern = re.compile(r'"((?:\\.|[^"])*)"|([^\\s]+)')
+    token_pattern = re.compile(r'"((?:\\.|[^"])*)"|([^\s]+)')
     tokens = []
     for match in token_pattern.finditer(rest):
         if match.group(1) is not None:
