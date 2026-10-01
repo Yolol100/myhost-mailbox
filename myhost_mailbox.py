@@ -106,21 +106,19 @@ def capabilities(client) -> set[str]:
 
 def parse_folder_row(raw: bytes) -> dict:
     text = raw.decode("utf-8", errors="replace")
-    flag_match = re.match(r"^\(([^)]*)\)", text)
-    flags = [] if not flag_match else [item.upper() for item in flag_match.group(1).split()]
-    rest = text[flag_match.end() :].strip() if flag_match else text.strip()
-    token_pattern = re.compile(r'"((?:\\.|[^"])*)"|([^\s]+)')
-    tokens = []
-    for match in token_pattern.finditer(rest):
-        if match.group(1) is not None:
-            token = re.sub(r'\\(["\\\\])', r'\1', match.group(1))
-        else:
-            token = match.group(2)
-        tokens.append(token)
-    if len(tokens) < 2:
-        raise RuntimeError("Could not parse IMAP LIST response")
-    return {"name": tokens[1], "flags": flags}
+    match = re.match(r'^\(([^)]*)\)\s+(?:"(?:\\.|[^"])*"|NIL)\s+(.+)$', text)
+    if not match:
+        raise ValueError("Malformed IMAP LIST response")
 
+    flags = [item.upper() for item in match.group(1).split()]
+    mailbox = match.group(2).strip()
+    if mailbox.startswith('"') and mailbox.endswith('"'):
+        name = mailbox[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    else:
+        name = mailbox
+    if not name:
+        raise ValueError("IMAP LIST response has empty mailbox name")
+    return {"name": name, "flags": flags}
 
 def list_folder_info(client) -> list[dict]:
     status, rows = client.list()
