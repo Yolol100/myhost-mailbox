@@ -57,11 +57,13 @@ jobs:
           find wordpress-plugin -type f -name '*.php' -print0 | xargs -0 -n1 php -l
           php -l tests/wordpress_mailbox_bridge_contract.php
           php -l tests/wordpress_mailbox_bridge_oidc_contract.php
+          php -l tests/wordpress_mailbox_bridge_crypto_contract.php
       - name: Bridge contracts
         run: |
           set -euo pipefail
           php tests/wordpress_mailbox_bridge_contract.php
           php tests/wordpress_mailbox_bridge_oidc_contract.php
+          php tests/wordpress_mailbox_bridge_crypto_contract.php
 
 
   package-wordpress-plugin:
