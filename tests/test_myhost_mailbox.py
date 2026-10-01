@@ -126,6 +126,23 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(rows[0]["uid"], "7")
         self.assertEqual(rows[0]["subject"], "hello")
 
+    def test_review_draft_metadata_is_exposed_in_summary_and_read(self):
+        msg = EmailMessage()
+        msg["From"] = "sender@example.test"
+        msg["To"] = "me@example.test"
+        msg["Subject"] = "Review"
+        msg["Message-ID"] = "<review@example.test>"
+        msg["X-Webactueel-Lead-ID"] = "growth-0123456789abcdefabcd"
+        msg["X-Webactueel-Review-Required"] = "contact-basis"
+        msg.set_content("Review body")
+
+        summary = m.message_summary(msg, "8")
+        full = m.serialize_message(msg, uid="8", include_attachments=False)
+        for result in (summary, full):
+            self.assertEqual(result["webactueel_lead_id"], "growth-0123456789abcdefabcd")
+            self.assertEqual(result["webactueel_review_required"], "contact-basis")
+
+
     def test_safe_delete_requires_uidplus(self):
         client = FakeIMAP(caps=b"IMAP4rev1")
         with self.assertRaises(RuntimeError):
