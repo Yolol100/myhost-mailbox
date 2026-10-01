@@ -149,10 +149,10 @@ $baseClaims = static function (): array {
 
 $privateClaims = static function () use ($baseClaims): array {
     return array_merge($baseClaims(), array(
-        'repository' => 'Yolol100/wordpressconnector',
-        'repository_id' => '1341990468',
+        'repository' => 'Yolol100/Wordpress',
+        'repository_id' => '933904076',
         'repository_visibility' => 'private',
-        'workflow_ref' => 'Yolol100/wordpressconnector/.github/workflows/mailbox-private-bridge.yml@refs/heads/main',
+        'workflow_ref' => 'Yolol100/Wordpress/.github/workflows/mailbox-private-bridge.yml@refs/heads/main',
     ));
 };
 

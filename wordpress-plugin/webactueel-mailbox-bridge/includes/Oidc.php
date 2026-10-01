@@ -13,9 +13,9 @@ final class Oidc
     private const JWKS_URL = 'https://token.actions.githubusercontent.com/.well-known/jwks';
     private const OWNER_ID = '22932777';
 
-    private const PRIVATE_REPOSITORY = 'Yolol100/wordpressconnector';
-    private const PRIVATE_REPOSITORY_ID = '1341990468';
-    private const PRIVATE_WORKFLOW_REF = 'Yolol100/wordpressconnector/.github/workflows/mailbox-private-bridge.yml@refs/heads/main';
+    private const PRIVATE_REPOSITORY = 'Yolol100/Wordpress';
+    private const PRIVATE_REPOSITORY_ID = '933904076';
+    private const PRIVATE_WORKFLOW_REF = 'Yolol100/Wordpress/.github/workflows/mailbox-private-bridge.yml@refs/heads/main';
 
     private const EXECUTOR_REPOSITORY = 'Yolol100/Leadscanner';
     private const EXECUTOR_REPOSITORY_ID = '1334704263';
