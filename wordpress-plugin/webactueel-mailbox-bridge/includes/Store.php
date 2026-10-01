@@ -23,7 +23,7 @@ final class Store
         add_action(self::EXPIRY_HOOK, array($this, 'expireIfMatches'), 10, 2);
     }
 
-    public function putRequest(string $requestId, array $request, int $ttl = self::DEFAULT_TTL): array
+    public function putRequest(string $requestId, array $request, int $ttl = self::DEFAULT_TTL, string $responsePublicKey = ''): array
     {
         $this->assertRequestId($requestId);
         $encoded = $this->encodeBounded($request, self::MAX_REQUEST_BYTES, 'Mailbox request');
@@ -42,6 +42,13 @@ final class Store
                 if (! hash_equals($hash, $existingHash)) {
                     throw new RuntimeException('Mailbox request_id already exists with different content.');
                 }
+                if ('' !== $responsePublicKey) {
+                    $responseKeyHash = hash('sha256', $responsePublicKey);
+                    $existingResponseKeyHash = isset($existing['response_key_sha256']) ? (string) $existing['response_key_sha256'] : '';
+                    if ('' === $existingResponseKeyHash || ! hash_equals($responseKeyHash, $existingResponseKeyHash)) {
+                        throw new RuntimeException('Mailbox request_id already exists with a different response key.');
+                    }
+                }
                 return $this->publicState($existing, false);
             }
 
@@ -56,6 +63,10 @@ final class Store
                 'created_at' => $now,
                 'expires_at' => $now + $ttl,
             );
+            if ('' !== $responsePublicKey) {
+                $record['response_public_key'] = $responsePublicKey;
+                $record['response_key_sha256'] = hash('sha256', $responsePublicKey);
+            }
             if (! add_option($key, $record, '', false)) {
                 throw new RuntimeException('Mailbox request could not be stored.');
             }
@@ -78,6 +89,19 @@ final class Store
             throw new RuntimeException('Mailbox request was not found or expired.');
         }
         return $record;
+    }
+
+    public function getResponsePublicKey(string $requestId): string
+    {
+        $this->assertRequestId($requestId);
+        $record = $this->activeRecord($this->key(self::REQUEST_PREFIX, $requestId));
+        $key = is_array($record) && isset($record['response_public_key']) && is_string($record['response_public_key'])
+            ? $record['response_public_key']
+            : '';
+        if ('' === $key) {
+            throw new RuntimeException('Mailbox response encryption key was not found or expired.');
+        }
+        return $key;
     }
 
     public function putResult(string $requestId, array $result, string $expectedRequestHash): array
