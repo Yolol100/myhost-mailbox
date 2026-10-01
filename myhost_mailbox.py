@@ -224,6 +224,8 @@ def message_summary(msg: EmailMessage, uid: str) -> dict:
         "subject": normalize_text(msg.get("Subject", "")),
         "date": normalize_text(msg.get("Date", "")) or None,
         "in_reply_to": normalize_text(msg.get("In-Reply-To", "")) or None,
+        "webactueel_lead_id": normalize_text(msg.get("X-Webactueel-Lead-ID", "")) or None,
+        "webactueel_review_required": normalize_text(msg.get("X-Webactueel-Review-Required", "")) or None,
         "has_attachments": any(True for _ in msg.iter_attachments()),
     }
 
@@ -255,6 +257,8 @@ def serialize_message(msg: EmailMessage, *, uid: str | None = None, include_atta
         "date": normalize_text(msg.get("Date", "")) or None,
         "in_reply_to": normalize_text(msg.get("In-Reply-To", "")) or None,
         "references": normalize_text(msg.get("References", "")) or None,
+        "webactueel_lead_id": normalize_text(msg.get("X-Webactueel-Lead-ID", "")) or None,
+        "webactueel_review_required": normalize_text(msg.get("X-Webactueel-Review-Required", "")) or None,
         "body_text": plain,
         "body_html": html,
         "attachments": attachments,
