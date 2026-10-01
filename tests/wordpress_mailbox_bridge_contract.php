@@ -110,8 +110,10 @@ foreach (array(
     "EXECUTOR_REPOSITORY = 'Yolol100/Leadscanner'",
     'mailbox-private-bridge.yml@refs/heads/main',
     'mailbox-execute.yml@refs/heads/main',
-    "'repository_visibility' => 'private'",
     "'repository_visibility' => 'public'",
+    "CONTROLLER_SHA_TRANSIENT = 'webactueel_mailbox_controller_sha_v1'",
+    "'sha' => \$this->controllerMainSha()",
+    "'sha' => \$this->executorMainSha()",
     "'sha' => \$this->executorMainSha()",
     'assertNotReplayed',
     "JTI_PREFIX = 'webactueel_secret_mailbox_jti_'",
@@ -128,6 +130,10 @@ foreach (array(
     '/state/(?P<request_id>',
     'authenticatePrivate',
     'authenticateExecutor',
+    '/crypto-key',
+    'decryptRequestEnvelope',
+    'encryptResultEnvelope',
+    'response_public_key_pem',
     'confirm_send=true',
     'confirm=true',
     "get_header('x-webactueel-mailbox-request-sha256')",
@@ -143,6 +149,7 @@ foreach (array(
     'webactueel_secret_mailbox_result_',
     'webactueel_secret_mailbox_jti_',
     'webactueel_secret_mailbox_lock_',
+    'webactueel_secret_mailbox_crypto_key_v1',
     'webactueel_mailbox_expire_state',
 ) as $needle) {
     if (false === strpos((string) $uninstall, $needle)) {
@@ -150,7 +157,7 @@ foreach (array(
     }
 }
 
-if (false === strpos((string) $bootstrap, 'Version: 0.1.0') || false === strpos((string) $bootstrap, '$store->register();')) {
+if (false === strpos((string) $bootstrap, 'Version: 0.2.0') || false === strpos((string) $bootstrap, '$store->register();') || false === strpos((string) $bootstrap, 'includes/Crypto.php')) {
     fwrite(STDERR, "plugin version missing\n"); exit(1);
 }
 if (preg_match('/(OUTREACH_MAIL_PASSWORD|BEGIN PRIVATE KEY|api[_-]?key\s*=)/i', (string) $oidc . (string) $rest . (string) $bootstrap)) {
