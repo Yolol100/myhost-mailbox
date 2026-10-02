@@ -220,6 +220,17 @@ if (1 !== $GLOBALS['bridge_remote_executor_calls']) {
     fwrite(STDERR, "executor revision lookup count mismatch\n"); exit(1);
 }
 
+$GLOBALS['bridge_executor_main_sha'] = '22965800c666e00191f0c143585e84017e66cb02';
+$rotated = $executorClaims();
+if (! $auth->authenticateExecutor(new WP_REST_Request(array(
+    'x-webactueel-github-oidc' => $token($rotated),
+)))) {
+    fwrite(STDERR, "fresh executor SHA was rejected after cached main changed\n"); exit(1);
+}
+if (2 !== $GLOBALS['bridge_remote_executor_calls']) {
+    fwrite(STDERR, "cached executor SHA mismatch did not force exactly one main refresh\n"); exit(1);
+}
+
 try {
     $bad = $executorClaims();
     $bad['sha'] = str_repeat('1', 40);
