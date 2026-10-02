@@ -61,6 +61,16 @@ try {
 } catch (RuntimeException $error) {
 }
 
+$claimed = $store->claimRequest($requestId);
+if (($claimed['request']['action'] ?? '') !== 'list_folders' || (int) ($claimed['claimed_at'] ?? 0) <= 0) {
+    fwrite(STDERR, "request claim failed\n"); exit(1);
+}
+try {
+    $store->claimRequest($requestId);
+    fwrite(STDERR, "duplicate request claim was accepted\n"); exit(1);
+} catch (RuntimeException $error) {
+    if (false === strpos($error->getMessage(), 'already claimed')) { throw $error; }
+}
 $result = $store->putResult($requestId, array('ok' => true), (string) $first['sha256']);
 if (empty($result['created']) || empty($store->getResult($requestId)['ready'])) {
     fwrite(STDERR, "result store/readback failed\n"); exit(1);
@@ -72,6 +82,7 @@ if (empty($store->getResult($requestId)['ready'])) {
 
 $lockId = 'mailbox-lock-123456';
 $lockFirst = $store->putRequest($lockId, array('action' => 'list_folders'), 300);
+$store->claimRequest($lockId);
 $lockKey = 'webactueel_secret_mailbox_lock_' . hash('sha256', $lockId);
 $GLOBALS['bridge_options'][$lockKey] = json_encode(array('token' => 'other', 'created_at' => time()));
 try {
@@ -85,11 +96,18 @@ unset($GLOBALS['bridge_options'][$lockKey]);
 $staleId = 'mailbox-stale-123456';
 $old = $store->putRequest($staleId, array('action' => 'list_folders'), 300);
 try {
+    $store->putResult($staleId, array('ok' => true), (string) $old['sha256']);
+    fwrite(STDERR, "unclaimed request accepted a result\n"); exit(1);
+} catch (RuntimeException $error) {
+    if (false === strpos($error->getMessage(), 'must be claimed')) { throw $error; }
+}
+try {
     $store->clear($staleId);
     fwrite(STDERR, "unread mailbox state was cleared\n"); exit(1);
 } catch (RuntimeException $error) {
     if (false === strpos($error->getMessage(), 'must be read')) { throw $error; }
 }
+$store->claimRequest($staleId);
 $store->putResult($staleId, array('ok' => true), (string) $old['sha256']);
 $ready = $store->getResult($staleId);
 if (empty($ready['ready'])) {
@@ -131,6 +149,7 @@ foreach (array(
     'confirm_send=true',
     'confirm=true',
     "get_header('x-webactueel-mailbox-request-sha256')",
+    'claimRequest($requestId)',
     'is_object($shape)',
 ) as $needle) {
     if (false === strpos((string) $rest, $needle)) {
@@ -150,7 +169,7 @@ foreach (array(
     }
 }
 
-if (false === strpos((string) $bootstrap, 'Version: 0.1.1') || false === strpos((string) $bootstrap, '$store->register();')) {
+if (false === strpos((string) $bootstrap, 'Version: 0.1.2') || false === strpos((string) $bootstrap, '$store->register();')) {
     fwrite(STDERR, "plugin version missing\n"); exit(1);
 }
 if (preg_match('/(OUTREACH_MAIL_PASSWORD|BEGIN PRIVATE KEY|api[_-]?key\s*=)/i', (string) $oidc . (string) $rest . (string) $bootstrap)) {

@@ -80,6 +80,38 @@ final class Store
         return $record;
     }
 
+    public function claimRequest(string $requestId): array
+    {
+        $this->assertRequestId($requestId);
+        $token = $this->acquireLock($requestId);
+        if ('' === $token) {
+            throw new RuntimeException('Mailbox request state is busy. Retry later.');
+        }
+
+        try {
+            $key = $this->key(self::REQUEST_PREFIX, $requestId);
+            $record = $this->activeRecord($key);
+            if (! is_array($record) || ! isset($record['request']) || ! is_array($record['request'])) {
+                throw new RuntimeException('Mailbox request was not found or expired.');
+            }
+            if ((int) ($record['claimed_at'] ?? 0) > 0) {
+                throw new RuntimeException('Mailbox request was already claimed for execution.');
+            }
+
+            $record['claimed_at'] = time();
+            if (! update_option($key, $record, false)) {
+                $stored = get_option($key, false);
+                if (! is_array($stored) || (int) ($stored['claimed_at'] ?? 0) <= 0) {
+                    throw new RuntimeException('Mailbox request claim could not be persisted.');
+                }
+                $record = $stored;
+            }
+            return $record;
+        } finally {
+            $this->releaseLock($requestId, $token);
+        }
+    }
+
     public function putResult(string $requestId, array $result, string $expectedRequestHash): array
     {
         $this->assertRequestId($requestId);
@@ -100,6 +132,9 @@ final class Store
             $currentHash = isset($request['sha256']) ? (string) $request['sha256'] : '';
             if (! hash_equals($currentHash, $expectedRequestHash)) {
                 throw new RuntimeException('Mailbox request changed before result storage.');
+            }
+            if ((int) ($request['claimed_at'] ?? 0) <= 0) {
+                throw new RuntimeException('Mailbox request must be claimed before result storage.');
             }
 
             $key = $this->key(self::RESULT_PREFIX, $requestId);
