@@ -59,8 +59,9 @@ final class Oidc
                 'event_name' => 'issues',
                 'runner_environment' => 'github-hosted',
             ),
-            function (): array {
-                return array('sha' => $this->executorMainSha());
+            function (array $claims): array {
+                $claimedSha = isset($claims['sha']) && is_string($claims['sha']) ? strtolower($claims['sha']) : '';
+                return array('sha' => $this->executorMainShaForClaim($claimedSha));
             }
         );
     }
@@ -105,7 +106,7 @@ final class Oidc
         }
 
         if (null !== $lateExpected) {
-            $this->assertExpectedClaims($claims, $lateExpected());
+            $this->assertExpectedClaims($claims, $lateExpected($claims));
         }
         $this->assertNotReplayed($claims);
         return true;
@@ -190,11 +191,27 @@ final class Oidc
         }
     }
 
-    private function executorMainSha(): string
+    private function executorMainShaForClaim(string $claimedSha): string
     {
-        $cached = get_transient(self::EXECUTOR_SHA_TRANSIENT);
-        if (is_string($cached) && preg_match('/^[a-f0-9]{40}\z/', $cached)) {
+        if (! preg_match('/^[a-f0-9]{40}\z/', $claimedSha)) {
+            throw new RuntimeException('GitHub OIDC claim is not trusted: sha.');
+        }
+
+        $cached = $this->executorMainSha(false);
+        if (hash_equals($cached, $claimedSha)) {
             return $cached;
+        }
+
+        return $this->executorMainSha(true);
+    }
+
+    private function executorMainSha(bool $forceRefresh = false): string
+    {
+        if (! $forceRefresh) {
+            $cached = get_transient(self::EXECUTOR_SHA_TRANSIENT);
+            if (is_string($cached) && preg_match('/^[a-f0-9]{40}\z/', $cached)) {
+                return $cached;
+            }
         }
 
         $response = wp_safe_remote_get('https://api.github.com/repos/Yolol100/Leadscanner/commits/main', array(
