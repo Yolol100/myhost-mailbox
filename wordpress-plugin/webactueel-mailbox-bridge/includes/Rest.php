@@ -118,7 +118,7 @@ final class Rest
     {
         try {
             $requestId = (string) $request->get_param('request_id');
-            $record = $this->store->getRequest($requestId);
+            $record = $this->store->claimRequest($requestId);
             return new \WP_REST_Response(array(
                 'request_id' => $requestId,
                 'request' => $record['request'],
