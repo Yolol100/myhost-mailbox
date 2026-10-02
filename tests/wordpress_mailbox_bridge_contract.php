@@ -130,7 +130,7 @@ foreach (array(
     'mailbox-execute.yml@refs/heads/main',
     "'repository_visibility' => 'private'",
     "'repository_visibility' => 'public'",
-    "'sha' => \$this->executorMainSha()",
+    "executorMainShaForClaim",
     'assertNotReplayed',
     "JTI_PREFIX = 'webactueel_secret_mailbox_jti_'",
     'claimJwksRefreshWindow',
@@ -169,7 +169,7 @@ foreach (array(
     }
 }
 
-if (false === strpos((string) $bootstrap, 'Version: 0.1.2') || false === strpos((string) $bootstrap, '$store->register();')) {
+if (false === strpos((string) $bootstrap, 'Version: 0.1.3') || false === strpos((string) $bootstrap, '$store->register();')) {
     fwrite(STDERR, "plugin version missing\n"); exit(1);
 }
 if (preg_match('/(OUTREACH_MAIL_PASSWORD|BEGIN PRIVATE KEY|api[_-]?key\s*=)/i', (string) $oidc . (string) $rest . (string) $bootstrap)) {
