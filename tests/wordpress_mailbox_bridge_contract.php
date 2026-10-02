@@ -96,8 +96,7 @@ unset($GLOBALS['bridge_options'][$lockKey]);
 $staleId = 'mailbox-stale-123456';
 $old = $store->putRequest($staleId, array('action' => 'list_folders'), 300);
 try {
-    $store->claimRequest($staleId);
-$store->putResult($staleId, array('ok' => true), (string) $old['sha256']);
+    $store->putResult($staleId, array('ok' => true), (string) $old['sha256']);
     fwrite(STDERR, "unclaimed request accepted a result\n"); exit(1);
 } catch (RuntimeException $error) {
     if (false === strpos($error->getMessage(), 'must be claimed')) { throw $error; }
@@ -108,6 +107,7 @@ try {
 } catch (RuntimeException $error) {
     if (false === strpos($error->getMessage(), 'must be read')) { throw $error; }
 }
+$store->claimRequest($staleId);
 $store->putResult($staleId, array('ok' => true), (string) $old['sha256']);
 $ready = $store->getResult($staleId);
 if (empty($ready['ready'])) {
