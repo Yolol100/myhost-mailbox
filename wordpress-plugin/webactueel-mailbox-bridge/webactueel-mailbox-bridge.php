@@ -3,7 +3,7 @@
  * Plugin Name: Webactueel Mailbox Bridge
  * Plugin URI: https://github.com/Yolol100/myhost-mailbox
  * Description: Private request/result bridge between ChatGPT-controlled GitHub workflows and the mijn.host mailbox runtime.
- * Version: 0.1.2
+ * Version: 0.1.3
  * Requires at least: 6.4
  * Requires PHP: 7.4
  * Author: Webactueel
@@ -19,7 +19,7 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
-define('WEBACTUEEL_MAILBOX_BRIDGE_VERSION', '0.1.2');
+define('WEBACTUEEL_MAILBOX_BRIDGE_VERSION', '0.1.3');
 define('WEBACTUEEL_MAILBOX_BRIDGE_PATH', plugin_dir_path(__FILE__));
 
 require_once WEBACTUEEL_MAILBOX_BRIDGE_PATH . 'includes/Store.php';
