@@ -14,6 +14,7 @@ class FakeIMAP:
         self.caps = caps
         self.uid_calls = []
         self.appended = []
+        self.enabled = []
         self.search_result = b"7"
         self.messages = {"7": self._raw("hello", "Body", "<m1@example.test>")}
 
@@ -31,6 +32,10 @@ class FakeIMAP:
 
     def capability(self):
         return "OK", [self.caps]
+
+    def enable(self, capability):
+        self.enabled.append(capability)
+        return "OK", [b"ENABLED"]
 
     def list(self):
         return "OK", [
@@ -122,6 +127,21 @@ class MailboxTests(unittest.TestCase):
         self.assertIn("FLAGGED", client.uid_calls[-1][1])
         msg = m.fetch_message(client, "INBOX", "7")
         self.assertEqual(m.serialize_message(msg)["body_text"], "Body")
+
+    def test_unicode_search_prefers_utf8_accept(self):
+        client = FakeIMAP(caps=b"IMAP4rev1 UIDPLUS MOVE ENABLE UTF8=ACCEPT")
+        self.assertEqual(m.search_message_uids(client, "INBOX", subject_text="café Ω 😀"), ["7"])
+        self.assertEqual(client.enabled, ["UTF8=ACCEPT"])
+        self.assertEqual(client.uid_calls[-1][1][0], None)
+
+    def test_unicode_search_falls_back_to_charset_utf8_bytes(self):
+        client = FakeIMAP(caps=b"IMAP4rev1 UIDPLUS MOVE")
+        self.assertEqual(m.search_message_uids(client, "INBOX", subject_text="café Ω 😀"), ["7"])
+        args = client.uid_calls[-1][1]
+        self.assertEqual(args[0:2], ("CHARSET", "UTF-8"))
+        self.assertIsInstance(args[-1], bytes)
+        self.assertIn("café".encode("utf-8"), args[-1])
+
 
     def test_list_summaries(self):
         rows = m.list_message_summaries(FakeIMAP(), "INBOX")

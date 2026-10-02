@@ -338,11 +338,34 @@ def _search_value(value: object) -> str:
     return text.replace('"', "")
 
 
+def _has_non_ascii(value: str) -> bool:
+    try:
+        value.encode("ascii")
+        return False
+    except UnicodeEncodeError:
+        return True
+
+
+def _enable_utf8_accept(client) -> bool:
+    caps = capabilities(client)
+    if "ENABLE" not in caps or "UTF8=ACCEPT" not in caps:
+        return False
+    enable = getattr(client, "enable", None)
+    if not callable(enable):
+        return False
+    try:
+        status, _ = enable("UTF8=ACCEPT")
+    except (imaplib.IMAP4.error, OSError):
+        return False
+    return status == "OK"
+
+
 def search_message_uids(client, folder: str, *, from_text: str | None = None, to_text: str | None = None, subject_text: str | None = None, body_text: str | None = None, unread_only: bool = False, flagged_only: bool = False, limit: int = 50) -> list[str]:
     if limit < 1 or limit > 500:
         raise ValueError("limit must be 1-500")
     select_folder(client, folder, readonly=True)
     criteria: list[str] = []
+    has_unicode = False
     if unread_only:
         criteria.append("UNSEEN")
     if flagged_only:
@@ -350,10 +373,17 @@ def search_message_uids(client, folder: str, *, from_text: str | None = None, to
     for key, value in (("FROM", from_text), ("TO", to_text), ("SUBJECT", subject_text), ("BODY", body_text)):
         value = _search_value(value)
         if value:
+            has_unicode = has_unicode or _has_non_ascii(value)
             criteria.extend([key, f'"{value}"'])
     if not criteria:
         criteria = ["ALL"]
-    data = _uid(client, "search", None, *criteria)
+
+    if not has_unicode or _enable_utf8_accept(client):
+        data = _uid(client, "search", None, *criteria)
+    else:
+        encoded = [item.encode("utf-8") for item in criteria]
+        data = _uid(client, "search", "CHARSET", "UTF-8", *encoded)
+
     uids = (data[0] if data else b"").split()
     return [uid.decode("ascii") for uid in uids[-limit:]][::-1]
 
