@@ -56,7 +56,7 @@ jobs:
             -p 127.0.0.1:19993:31993 \
             -e USER_PASSWORD=synthetic-ci-password-only \
             -v "$RUNNER_TEMP/imap-certs:/etc/dovecot/ssl:ro" \
-            dovecot/dovecot:latest-dev
+            dovecot/dovecot@sha256:d08fcd7c274f11d42cc77d1eb3f44388398ee8656ff16502c6f9e08236165bbb
       - name: Black-box TLS, login, create, read, replace and delete
         env:
           MAILBOX_CI_ISOLATED: 'yes'
