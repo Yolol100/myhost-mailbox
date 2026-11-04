@@ -45,8 +45,8 @@ jobs:
             -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
             -keyout "$RUNNER_TEMP/imap-certs/tls.key" \
             -out "$RUNNER_TEMP/imap-certs/tls.crt" 2>/dev/null
-          sudo chown 1000:1000 "$RUNNER_TEMP/imap-certs/tls.key"
           chmod 0400 "$RUNNER_TEMP/imap-certs/tls.key"
+          sudo chown 1000:1000 "$RUNNER_TEMP/imap-certs/tls.key"
           echo "SSL_CERT_FILE=$RUNNER_TEMP/imap-certs/tls.crt" >> "$GITHUB_ENV"
       - name: Start isolated IMAPS Dovecot Docker container
         shell: bash
