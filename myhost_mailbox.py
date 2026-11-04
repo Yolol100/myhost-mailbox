@@ -569,8 +569,9 @@ def build_message(payload: dict, *, include_bcc: bool = True, operation_id: str 
 
 def _verify_by_header(client, folder: str, header: str, value: str) -> str:
     uids = _search_header(client, folder, header, value)
-    if len(uids) != 1:
-        raise UnknownOutcomeError(f"write succeeded but exact readback found {len(uids)} matching messages")
+    # A nonpositive or nonnumeric search result cannot identify the new draft.
+    if len(uids) != 1 or not UID_RE.fullmatch(uids[0]):
+        raise UnknownOutcomeError(f"write succeeded but exact readback found {len(uids)} valid matching messages")
     return uids[0]
 
 
@@ -578,14 +579,29 @@ def append_draft(client, folder: str, payload: dict) -> str:
     folder = _required_text(folder, "folder")
     operation_id = uuid.uuid4().hex
     msg = build_message(payload, operation_id=operation_id)
-    status, _ = client.append(folder, "(\\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes(policy=default))
+    expected_raw = msg.as_bytes(policy=default)
+    status, _ = client.append(folder, "(\\Draft)", imaplib.Time2Internaldate(time.time()), expected_raw)
     if status != "OK":
         raise RuntimeError("IMAP APPEND failed")
-    return _verify_by_header(client, folder, "X-Webactueel-Mailbox-Operation-ID", operation_id)
+    # APPEND OK and a matching header are not proof that the server preserved
+    # the recipient, subject, message body or attachments. Fail closed.
+    new_uid = _verify_by_header(client, folder, "X-Webactueel-Mailbox-Operation-ID", operation_id)
+    try:
+        received = fetch_message(client, folder, new_uid)
+        expected = BytesParser(policy=default).parsebytes(expected_raw)
+        if received.as_bytes(policy=default) != expected.as_bytes(policy=default):
+            raise ValueError("stored MIME differs from submitted draft")
+    except Exception as exc:
+        raise UnknownOutcomeError("draft was appended but its complete MIME readback is unverified") from exc
+    return new_uid
 
 
 def replace_draft(client, folder: str, uid: str, payload: dict) -> str:
     old_uid = _uid_text(uid)
+    # Check UIDPLUS before APPEND: otherwise we can create a duplicate draft
+    # and only then discover it is unsafe to remove the old draft.
+    if "UIDPLUS" not in capabilities(client):
+        raise RuntimeError("Safe draft replacement requires IMAP UIDPLUS support")
     new_uid = append_draft(client, folder, payload)
     try:
         delete_message(client, folder, old_uid)
