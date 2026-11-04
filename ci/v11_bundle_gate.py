@@ -138,8 +138,8 @@ def run_zip_tests(archive, digest):
         raise ValueError('SHA256 mismatch; refusing to run unverified source')
     with tempfile.TemporaryDirectory(prefix='mailbox-ci-') as tmp:
         root = safe_extract(archive, Path(tmp))
-        # Never open or modify a real account. Bundled tests should use mocks.
-        run_windows_native_checks(root)
+        # Verify the test suite first. Even a checksum-valid, fake archive
+        # must not reach native DPAPI or Credential Manager code.
         result = subprocess.run([sys.executable, '-m', 'unittest', 'discover',
                                  '-s', '.', '-p', 'test*.py', '-q'],
                                 cwd=root, capture_output=True, text=True, timeout=360)
@@ -153,6 +153,8 @@ def run_zip_tests(archive, digest):
         skipped = re.search(r'skipped=(\d+)', output)
         if skipped and int(skipped.group(1)):
             raise RuntimeError('V11 test run skipped scenarios instead of proving them')
+        # Never open or modify a real account. Bundled tests use synthetic data.
+        run_windows_native_checks(root)
     print('BUNDLED_V11_TESTS=PASS tests=' + str(count) + ' sha256=verified windows_native=' +
           ('yes' if os.name == 'nt' else 'no') + ' sent=0')
 
