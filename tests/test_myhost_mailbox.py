@@ -69,6 +69,8 @@ class FakeIMAP:
 
     def append(self, folder, flags, date_time, raw):
         self.appended.append((folder, flags, raw))
+        # Simulate the exact newly appended MIME being returned by IMAP FETCH.
+        self.messages["7"] = raw
         return "OK", [b""]
 
     def logout(self):
@@ -190,6 +192,40 @@ class MailboxTests(unittest.TestCase):
         })
         self.assertEqual(uid, "7")
         self.assertIn(b"X-Webactueel-Mailbox-Operation-ID:", client.appended[0][2])
+
+    def test_replace_draft_uidplus_preflight_does_not_append(self):
+        client = FakeIMAP(caps=b"IMAP4rev1")
+        payload = {"to": "person@example.test", "subject": "Test", "body_text": "Hello"}
+        with self.assertRaises(RuntimeError):
+            m.replace_draft(client, "Drafts", "7", payload)
+        self.assertEqual(client.appended, [])
+        self.assertFalse(any(command in {"store", "expunge"} for command, _ in client.uid_calls))
+
+    def test_append_draft_rejects_nonpositive_readback_uid(self):
+        client = FakeIMAP()
+        client.search_result = b"0"
+        with self.assertRaises(m.UnknownOutcomeError):
+            m.append_draft(client, "Drafts", {
+                "to": "person@example.test", "subject": "Test", "body_text": "Hello",
+            })
+
+    def test_append_draft_rejects_tampered_mime_without_deleting(self):
+        client = FakeIMAP()
+        append = client.append
+
+        def corrupted_append(folder, flags, date_time, raw):
+            status = append(folder, flags, date_time, raw)
+            msg = m.BytesParser(policy=m.default).parsebytes(raw)
+            msg.set_content("CORRUPTED ON SERVER")
+            client.messages["7"] = msg.as_bytes(policy=m.default)
+            return status
+
+        client.append = corrupted_append
+        with self.assertRaises(m.UnknownOutcomeError):
+            m.append_draft(client, "Drafts", {
+                "to": "person@example.test", "subject": "Test", "body_text": "Hello",
+            })
+        self.assertFalse(any(command in {"store", "expunge"} for command, _ in client.uid_calls))
 
     def test_append_draft_unknown_outcome_when_not_unique(self):
         client = FakeIMAP()
