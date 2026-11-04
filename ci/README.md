@@ -19,6 +19,12 @@ De workflow heeft twee afzonderlijke testniveaus:
    inclusief echte Windows-DPAPI en Credential Manager, met een tijdelijke
    fictieve gebruikersnaam in de Windows Credential Manager.
 
+De ZIP-check weigert nu ontbrekende programmabestanden, onjuiste of ontbrekende
+`SHA256SUMS.txt`-regels, dubbele ZIP-bestanden, een verkeerde downloadhash,
+en een testsuite met minder dan 190 tests of overgeslagen scenario's.
+De hash is alleen betrouwbaar wanneer hij onafhankelijk van de release-ZIP
+is vastgesteld. Een groene protocoltest is **geen** Windows-V11-goedkeuring.
+
 **Een sandbox-link van ChatGPT is geen publiek GitHub-releasebestand.** De
 conversatie-ZIP moet dus eenmalig als release-asset aan deze repository worden
 gekoppeld voordat de V11-Windows-test op GitHub zelf kan draaien. Een GitHub

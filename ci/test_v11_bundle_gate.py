@@ -5,7 +5,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from v11_bundle_gate import safe_extract, validate_release_url, run_zip_tests
+from v11_bundle_gate import (safe_extract, validate_release_url, run_zip_tests,
+                             MANDATORY_BUNDLE_FILES)
 
 
 class BundleGateTests(unittest.TestCase):
@@ -35,6 +36,49 @@ class BundleGateTests(unittest.TestCase):
                 z.writestr('not-the-app.txt','hello')
             with self.assertRaises(ValueError):
                 safe_extract(path,Path(d)/'dest')
+
+    def _synthetic_archive(self, root, *, corrupt=False):
+        root = Path(root)
+        archive = root / 'almost_v11.zip'
+        test_stub = ("import unittest\n"
+                     "class TestStub(unittest.TestCase):\n"
+                     "    def test_fake(self): self.assertTrue(True)\n")
+        files = {name: test_stub if name.startswith('test_') else '# fake\n'
+                 for name in MANDATORY_BUNDLE_FILES if name != 'SHA256SUMS.txt'}
+        manifest = ''.join(hashlib.sha256(value.encode()).hexdigest() + '  ' + name + '\n'
+                           for name, value in sorted(files.items()))
+        if corrupt:
+            manifest = manifest.replace(next(iter(files)), 'different_file.py', 1)
+        with zipfile.ZipFile(archive, 'w') as z:
+            for name, content in files.items():
+                z.writestr('Fake_V11/' + name, content)
+            z.writestr('Fake_V11/SHA256SUMS.txt', manifest)
+        return archive
+
+    def test_reject_trivial_test_suite_even_when_all_files_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            archive = self._synthetic_archive(d)
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(RuntimeError, 'Insufficient V11 tests'):
+                run_zip_tests(archive, digest)
+
+    def test_reject_tampered_sha256_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            archive = self._synthetic_archive(d, corrupt=True)
+            with self.assertRaisesRegex(ValueError, 'manifest'):
+                safe_extract(archive, Path(d) / 'extracted')
+
+    def test_reject_duplicate_zip_entries(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'duplicated.zip'
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', UserWarning)
+                with zipfile.ZipFile(path,'w') as z:
+                    z.writestr('App/x.py','first')
+                    z.writestr('App/x.py','second')
+            with self.assertRaisesRegex(ValueError, 'Duplicate'):
+                safe_extract(path, Path(d)/'out')
 
     def test_reject_incorrect_hash_before_running_source(self):
         with tempfile.TemporaryDirectory() as d:
