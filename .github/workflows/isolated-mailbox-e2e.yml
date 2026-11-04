@@ -1,0 +1,116 @@
+name: Isolated mailbox end-to-end (no production credentials)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      v11_release_url:
+        description: 'Optional: GitHub release URL of a V11+ ZIP in this repo (leave blank for core tests)'
+        type: string
+        required: false
+      v11_sha256:
+        description: 'Required with v11_release_url: SHA256 of the exact ZIP'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  imaps-real-server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Existing mailbox tests and ZIP gate safety tests
+        env:
+          PYTHONPATH: '.:ci'
+        run: |
+          python -m compileall -q myhost_mailbox.py tests ci
+          python -m unittest discover -s tests -p 'test_*.py' -q
+          python -m unittest discover -s ci -p 'test_*.py' -q
+      - name: Generate local TLS identity for synthetic server
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/imap-certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+            -keyout "$RUNNER_TEMP/imap-certs/tls.key" \
+            -out "$RUNNER_TEMP/imap-certs/tls.crt" 2>/dev/null
+          sudo chown 1000:1000 "$RUNNER_TEMP/imap-certs/tls.key"
+          chmod 0400 "$RUNNER_TEMP/imap-certs/tls.key"
+          echo "SSL_CERT_FILE=$RUNNER_TEMP/imap-certs/tls.crt" >> "$GITHUB_ENV"
+      - name: Start isolated IMAPS Dovecot Docker container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name "mailbox-e2e-${GITHUB_RUN_ID}" \
+            -p 127.0.0.1:19993:31993 \
+            -e USER_PASSWORD=synthetic-ci-password-only \
+            -v "$RUNNER_TEMP/imap-certs:/etc/dovecot/ssl:ro" \
+            dovecot/dovecot:latest-dev
+      - name: Black-box TLS, login, create, read, replace and delete
+        env:
+          MAILBOX_CI_ISOLATED: 'yes'
+          OUTREACH_IMAP_HOST: localhost
+          OUTREACH_IMAP_PORT: '19993'
+          OUTREACH_MAIL_USER: ci-fake@example.invalid
+          OUTREACH_MAIL_PASSWORD: synthetic-ci-password-only
+          OUTREACH_SENDER_EMAIL: ci-fake@example.invalid
+          OUTREACH_SENDER_NAME: Synthetic CI
+          PYTHONPATH: '.'
+        run: python ci/imap_e2e.py
+      - name: Remove all synthetic messages and the test server
+        if: always()
+        shell: bash
+        run: docker rm -f "mailbox-e2e-${GITHUB_RUN_ID}" >/dev/null 2>&1 || true
+
+  windows-runtime:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Run existing mailbox and artifact safety tests on native Windows
+        shell: pwsh
+        env:
+          PYTHONPATH: '.;ci'
+        run: |
+          python -m compileall -q myhost_mailbox.py tests ci
+          python -m unittest discover -s tests -p 'test_*.py' -q
+          python -m unittest discover -s ci -p 'test_*.py' -q
+
+  native-v11-from-release:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.v11_release_url != '' && inputs.v11_sha256 != ''
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Install the same TLS dependency as the Windows program
+        run: python -m pip install truststore==0.10.5
+      - name: Verify pinned ZIP; run V11 tests, real Windows DPAPI and Credential Manager
+        shell: pwsh
+        env:
+          V11_URL: ${{ inputs.v11_release_url }}
+          V11_SHA256: ${{ inputs.v11_sha256 }}
+        run: |
+          python ci/v11_bundle_gate.py --release-url "$env:V11_URL" --sha256 "$env:V11_SHA256"
