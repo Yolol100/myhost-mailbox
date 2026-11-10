@@ -1,29 +1,7 @@
-# myhost-mailbox
+# Mijn.Host mailbox — gearchiveerd
 
-Generic mijn.host IMAP/SMTP mailbox runtime for controlled automation.
+De actieve IMAP/SMTP-runtime, WordPress-mailboxbridge, CI en tests zijn op 10 november 2026 uit `main` verwijderd. Deze repository biedt geen actieve mail-, concept- of verzendfunctionaliteit meer.
 
-## Scope
+**Volledig herstelpunt:** [`archive/pre-myhost-mail-cleanup-2026-11-10`](../../tree/archive/pre-myhost-mail-cleanup-2026-11-10).
 
-This repository contains reusable mailbox code and tests for:
-- listing folders;
-- listing, reading and searching messages;
-- flags/read state;
-- copying, moving and deleting messages;
-- creating and replacing drafts;
-- attachments;
-- reply/reply-all and forwarding payloads;
-- SMTP submission behind an explicit double confirmation gate.
-
-## Security boundary
-
-The repository may be public, but mailbox credentials and mailbox content are not repository data.
-
-- Credentials belong in GitHub Actions Secrets or another secret store.
-- Do not commit passwords, tokens, message bodies, recipients or attachments.
-- Do not print mailbox content into public workflow logs.
-- Do not upload mailbox content as public workflow artifacts.
-- Sending requires both an explicit request confirmation and `OUTREACH_SMTP_SEND_ENABLED=true`.
-- Destructive actions require explicit confirmation.
-- The lead-generation project remains review-first and does not inherit automatic sending.
-
-Source code being public does not make the mailbox public; runtime data must remain outside repository-visible output.
+Herstel uitsluitend na expliciete goedkeuring. Historische mailboxberichten, afmeldingen, suppressies en gegevens zijn niet verwijderd. Dit archief is geen autorisatie om mail te verzenden.
