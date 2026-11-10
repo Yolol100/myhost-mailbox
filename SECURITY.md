@@ -1,25 +1,11 @@
-# Security
+# Security — research-only archive boundary
 
-This repository may be public. Source code is not mailbox data.
+This public repository contains no active mailbox, draft or message-delivery runtime. The previous implementation was removed from `main` on 10 November 2026 and retained only on `archive/pre-myhost-mail-cleanup-2026-11-10`.
 
-## Never commit
+## Rules
 
-- mailbox passwords, tokens or application passwords;
-- message bodies, recipients, attachments or raw MIME from a real mailbox;
-- generated request/result payloads containing personal or business correspondence;
-- debug logs containing authentication or mailbox data.
-
-## Runtime rules
-
-- Store credentials only in a secret manager or GitHub Actions Secrets.
-- Keep GitHub token permissions at least privilege.
-- Do not enable Actions debug logging for live mailbox runs.
-- Do not upload mailbox results as artifacts in a public repository.
-- Do not write mailbox results to issues, pull requests, commits, job summaries or workflow logs.
-- SMTP sending requires both an explicit per-request confirmation and `OUTREACH_SMTP_SEND_ENABLED=true`.
-- Delete and draft-replace operations require exact target identity and readback.
-- If a write may have succeeded but readback is ambiguous, treat it as an unknown outcome and do not retry blindly.
-
-## Reporting
-
-Do not open a public issue containing credentials or real mailbox content.
+- Never commit credentials, secrets, historical correspondence, personal data or mailbox content.
+- No active mail integrations, send/draft commands, or scheduler may be restored from this repository.
+- Archived access, code or documentation never grants permission for mailbox operations.
+- Preserve historical opt-outs, bounce records, dedupe/suppressions and restoration evidence; do not destroy or reset them as part of repository cleanup.
+- A future restoration requires a separate explicit change request, technical and legal review, rollback and readback.
